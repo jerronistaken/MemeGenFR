@@ -3,35 +3,56 @@ package com.example.facialrecog
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.*
 import android.net.Uri
 import android.os.Bundle
+import android.view.View
+import android.widget.FrameLayout
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.annotation.OptIn
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ExperimentalGetImage
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageProxy
+import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.camera.core.*
-import androidx.camera.view.PreviewView
-import androidx.compose.ui.viewinterop.AndroidView
 import com.example.facialrecog.ui.theme.FacialRecogTheme
 import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.face.Face
+import com.google.mlkit.vision.face.FaceContour
 import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetectorOptions
+import com.google.mlkit.vision.pose.Pose
 import com.google.mlkit.vision.pose.PoseDetection
+import com.google.mlkit.vision.pose.PoseLandmark
 import com.google.mlkit.vision.pose.defaults.PoseDetectorOptions
+import com.google.mediapipe.framework.image.BitmapImageBuilder
+import com.google.mediapipe.framework.image.MPImage
+import com.google.mediapipe.tasks.core.BaseOptions
+import com.google.mediapipe.tasks.vision.core.RunningMode
+import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker
+import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.Executors
 import kotlin.math.abs
+import kotlin.math.sqrt
 
 class MainActivity : ComponentActivity() {
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -51,14 +72,15 @@ fun PoseExpressionApp() {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
+    var showDebug by remember { mutableStateOf(true) } // Changed default to true
+
     var hasCameraPermission by remember {
         mutableStateOf(
-            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA)
-                    == PackageManager.PERMISSION_GRANTED
+            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
+                    PackageManager.PERMISSION_GRANTED
         )
     }
 
-    // Request permission on first launch
     LaunchedEffect(Unit) {
         if (!hasCameraPermission) {
             ActivityCompat.requestPermissions(
@@ -69,7 +91,6 @@ fun PoseExpressionApp() {
         }
     }
 
-    // Re-check permission after request
     DisposableEffect(Unit) {
         val observer = androidx.lifecycle.LifecycleEventObserver { _, _ ->
             hasCameraPermission =
@@ -86,91 +107,77 @@ fun PoseExpressionApp() {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(12.dp)
+            .padding(horizontal = 12.dp, vertical = 12.dp)
     ) {
-        Text(
-            text = "Live Pose + Face Keywords",
-            style = MaterialTheme.typography.titleLarge
-        )
-        Spacer(Modifier.height(8.dp))
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "MemeGenFR",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f)
+            )
+
+            TextButton(onClick = { showDebug = !showDebug }) {
+                Text(if (showDebug) "Debug: ON" else "Debug: OFF")
+            }
+        }
 
         if (!hasCameraPermission) {
             Text("Camera permission is required. Please allow it in the prompt.")
-            Spacer(Modifier.height(8.dp))
             return@Column
         }
 
-        // Camera Preview + Analyzer
         CameraPreview(
             modifier = Modifier
                 .fillMaxWidth()
-                .weight(1f),
+                .height(420.dp),
+            showDebug = showDebug,
             onKeywords = { k, dbg ->
                 keywords = k
                 lastDebug = dbg
             }
         )
 
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(12.dp))
 
-        Text(
-            text = "Detected keywords:",
-            style = MaterialTheme.typography.titleMedium
-        )
-        Text(
-            text = keywords.joinToString(", "),
-            style = MaterialTheme.typography.bodyLarge
-        )
+        Text("Detected keywords:", style = MaterialTheme.typography.titleMedium)
+        Text(keywords.joinToString(", "), style = MaterialTheme.typography.bodyLarge)
 
         Spacer(Modifier.height(6.dp))
-        Text(
-            text = "Debug: $lastDebug",
-            style = MaterialTheme.typography.bodySmall
-        )
+        Text("Debug: $lastDebug", style = MaterialTheme.typography.bodySmall)
 
-        Spacer(Modifier.height(10.dp))
+        Spacer(Modifier.height(12.dp))
 
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(
-                modifier = Modifier.weight(1f),
-                onClick = {
-                    val query = keywords.joinToString(" ")
-                    // Google Images search
-                    val url = "https://www.google.com/search?tbm=isch&q=" + Uri.encode(query)
-                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
-                    context.startActivity(intent)
-                }
-            ) {
-                Text("Search Images")
+        OutlinedButton(
+            modifier = Modifier.fillMaxWidth(),
+            onClick = {
+                val query = keywords.joinToString(" ")
+                val url = "https://www.google.com/search?tbm=isch&q=" + Uri.encode(query)
+                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
             }
-
-            OutlinedButton(
-                modifier = Modifier.weight(1f),
-                onClick = {
-                    // quick “pose” hint for better results
-                    val query = (keywords + "pose").joinToString(" ")
-                    val url = "https://www.google.com/search?tbm=isch&q=" + Uri.encode(query)
-                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
-                    context.startActivity(intent)
-                }
-            ) {
-                Text("Search + 'pose'")
-            }
+        ) {
+            Text("Search Online")
         }
     }
 }
 
+@OptIn(ExperimentalGetImage::class)
 @Composable
 fun CameraPreview(
     modifier: Modifier = Modifier,
+    showDebug: Boolean,
     onKeywords: (List<String>, String) -> Unit
 ) {
-    val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    val context = LocalContext.current
 
     val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
 
-    // ML Kit Pose detector
     val poseDetector = remember {
         val options = PoseDetectorOptions.Builder()
             .setDetectorMode(PoseDetectorOptions.STREAM_MODE)
@@ -178,20 +185,68 @@ fun CameraPreview(
         PoseDetection.getClient(options)
     }
 
-    // ML Kit Face detector (fast + basic probabilities)
     val faceDetector = remember {
         val options = FaceDetectorOptions.Builder()
             .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
             .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
+            .setContourMode(FaceDetectorOptions.CONTOUR_MODE_ALL)
             .enableTracking()
             .build()
         FaceDetection.getClient(options)
     }
 
+    val handLandmarker = remember {
+        try {
+            val options = HandLandmarker.HandLandmarkerOptions.builder()
+                .setBaseOptions(
+                    BaseOptions.builder()
+                        .setModelAssetPath("hand_landmarker.task")
+                        .build()
+                )
+                .setRunningMode(RunningMode.IMAGE)
+                .setNumHands(2)
+                .build()
+            HandLandmarker.createFromOptions(context, options)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    val debugViewRef = remember { mutableStateOf<DebugLandmarkView?>(null) }
+
+    LaunchedEffect(showDebug) {
+        debugViewRef.value?.visibility = if (showDebug) View.VISIBLE else View.GONE
+    }
+
     AndroidView(
         modifier = modifier,
         factory = { ctx ->
-            val previewView = PreviewView(ctx)
+            val container = FrameLayout(ctx)
+
+            val previewView = PreviewView(ctx).apply {
+                scaleType = PreviewView.ScaleType.FILL_CENTER
+                implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+            }
+
+            val debugView = DebugLandmarkView(ctx).apply {
+                visibility = if (showDebug) View.VISIBLE else View.GONE
+            }
+            debugViewRef.value = debugView
+
+            container.addView(
+                previewView,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT
+                )
+            )
+            container.addView(
+                debugView,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT
+                )
+            )
 
             val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
             cameraProviderFuture.addListener({
@@ -205,6 +260,9 @@ fun CameraPreview(
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
 
+                val isFrontCamera = true
+                val cameraSelector = CameraSelector.DEFAULT_FRONT_CAMERA
+
                 analysis.setAnalyzer(cameraExecutor) { imageProxy ->
                     val mediaImage = imageProxy.image
                     if (mediaImage == null) {
@@ -215,7 +273,27 @@ fun CameraPreview(
                     val rotation = imageProxy.imageInfo.rotationDegrees
                     val inputImage = InputImage.fromMediaImage(mediaImage, rotation)
 
-                    // Run pose first, then face; merge keywords
+                    val handResultForGesture: HandLandmarkerResult? = try {
+                        if (handLandmarker != null) {
+                            val bmp = imageProxyToUprightBitmap(
+                                imageProxy = imageProxy,
+                                rotationDegrees = rotation,
+                                mirrorX = isFrontCamera
+                            )
+                            val mpImage: MPImage = BitmapImageBuilder(bmp).build()
+                            val r = handLandmarker.detect(mpImage)
+                            bmp.recycle()
+                            r
+                        } else null
+                    } catch (_: Exception) {
+                        null
+                    }
+
+                    val handKeywords = HandKeywordExtractor.extractHandKeywords(
+                        result = handResultForGesture,
+                        isFrontCameraMirrored = isFrontCamera
+                    )
+
                     poseDetector.process(inputImage)
                         .addOnSuccessListener { pose ->
                             val poseKeywords = PoseKeywordExtractor.extractPoseKeywords(pose)
@@ -223,28 +301,56 @@ fun CameraPreview(
                             faceDetector.process(inputImage)
                                 .addOnSuccessListener { faces ->
                                     val faceKeywords = FaceKeywordExtractor.extractFaceKeywords(faces)
-                                    val merged = (poseKeywords + faceKeywords)
-                                        .distinct()
-                                        .ifEmpty { listOf("no_pose_or_face") }
 
-                                    val dbg = "poseLandmarks=${pose.allPoseLandmarks.size}, faces=${faces.size}"
+                                    val merged = (poseKeywords + faceKeywords + handKeywords)
+                                        .distinct()
+                                        .ifEmpty { listOf("no_pose_face_hand") }
+
+                                    val dbg = buildString {
+                                        append("pose=${pose.allPoseLandmarks.size}, faces=${faces.size}")
+                                        if (handLandmarker == null) append(", hands=MODEL_MISSING")
+                                        else append(", hands=${handResultForGesture?.handedness()?.size ?: 0}")
+                                        if (handKeywords.isNotEmpty()) append(", handKW=${handKeywords.joinToString("|")}")
+                                    }
+
                                     onKeywords(merged, dbg)
+
+                                    if (showDebug) {
+                                        debugView.post {
+                                            debugView.visibility = View.VISIBLE
+                                            debugView.update(
+                                                faces = faces,
+                                                pose = pose,
+                                                handResult = handResultForGesture,
+                                                imageW = imageProxy.width,
+                                                imageH = imageProxy.height,
+                                                rotationDegrees = rotation,
+                                                isFrontCamera = isFrontCamera
+                                            )
+                                        }
+                                    } else {
+                                        debugView.post {
+                                            debugView.visibility = View.GONE
+                                        }
+                                    }
                                 }
                                 .addOnFailureListener {
-                                    val merged = poseKeywords.ifEmpty { listOf("pose_only") }
+                                    val merged = (poseKeywords + handKeywords).distinct()
+                                        .ifEmpty { listOf("pose_and_hand_only") }
                                     onKeywords(merged, "Face failed: ${it.javaClass.simpleName}")
+                                    debugView.post { debugView.visibility = View.GONE }
                                 }
                                 .addOnCompleteListener {
                                     imageProxy.close()
                                 }
                         }
                         .addOnFailureListener {
-                            onKeywords(listOf("pose_failed"), "Pose failed: ${it.javaClass.simpleName}")
+                            val merged = handKeywords.ifEmpty { listOf("pose_failed") }
+                            onKeywords(merged, "Pose failed: ${it.javaClass.simpleName}")
+                            debugView.post { debugView.visibility = View.GONE }
                             imageProxy.close()
                         }
                 }
-
-                val cameraSelector = CameraSelector.DEFAULT_FRONT_CAMERA
 
                 try {
                     cameraProvider.unbindAll()
@@ -257,16 +363,311 @@ fun CameraPreview(
                 } catch (e: Exception) {
                     onKeywords(listOf("camera_bind_failed"), "Camera bind failed: ${e.message}")
                 }
-
             }, ContextCompat.getMainExecutor(ctx))
 
-            previewView
+            container
         }
     )
 }
 
+class DebugLandmarkView(context: android.content.Context) : View(context) {
+
+    private var faces: List<Face> = emptyList()
+    private var pose: Pose? = null
+    private var handResult: HandLandmarkerResult? = null
+
+    private var imageW = 0
+    private var imageH = 0
+    private var rotationDegrees = 0
+    private var isFrontCamera = true
+
+    // Enhanced paint styles for better visibility
+    private val faceBboxPaint = Paint().apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 6f
+        color = Color.GREEN
+        isAntiAlias = true
+    }
+
+    private val faceContourPaint = Paint().apply {
+        style = Paint.Style.FILL
+        color = Color.YELLOW
+        isAntiAlias = true
+    }
+
+    private val poseDotPaint = Paint().apply {
+        style = Paint.Style.FILL
+        color = Color.CYAN
+        isAntiAlias = true
+    }
+
+    private val poseLinePaint = Paint().apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 8f
+        color = Color.rgb(0, 255, 255) // Bright cyan
+        isAntiAlias = true
+    }
+
+    private val wristPaint = Paint().apply {
+        style = Paint.Style.FILL
+        color = Color.MAGENTA
+        isAntiAlias = true
+    }
+
+    private val handPaint = Paint().apply {
+        style = Paint.Style.FILL
+        color = Color.RED
+        isAntiAlias = true
+    }
+
+    private val handLinePaint = Paint().apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 4f
+        color = Color.rgb(255, 100, 100) // Light red
+        isAntiAlias = true
+    }
+
+    private val textPaint = Paint().apply {
+        style = Paint.Style.FILL
+        color = Color.WHITE
+        textSize = 40f
+        isAntiAlias = true
+        setShadowLayer(4f, 2f, 2f, Color.BLACK)
+    }
+
+    fun update(
+        faces: List<Face>,
+        pose: Pose?,
+        handResult: HandLandmarkerResult?,
+        imageW: Int,
+        imageH: Int,
+        rotationDegrees: Int,
+        isFrontCamera: Boolean
+    ) {
+        this.faces = faces
+        this.pose = pose
+        this.handResult = handResult
+        this.imageW = imageW
+        this.imageH = imageH
+        this.rotationDegrees = rotationDegrees
+        this.isFrontCamera = isFrontCamera
+        postInvalidate()
+    }
+
+    private fun mapImageToView(imgX: Float, imgY: Float): PointF {
+        if (imageW == 0 || imageH == 0 || width == 0 || height == 0) {
+            return PointF(0f, 0f)
+        }
+
+        // For front camera, ML Kit coordinates are already mirrored in the X axis
+        // We need to mirror them back before rotation, then apply preview mirroring
+        var x = if (isFrontCamera) imageW - imgX else imgX
+        var y = imgY
+
+        // Apply rotation transformation
+        val (rotX, rotY) = when (rotationDegrees) {
+            90 -> Pair(imageH - y, x)
+            180 -> Pair(imageW - x, imageH - y)
+            270 -> Pair(y, imageW - x)
+            else -> Pair(x, y)
+        }
+
+        // Get rotated dimensions
+        val (rotW, rotH) = if (rotationDegrees == 90 || rotationDegrees == 270) {
+            Pair(imageH, imageW)
+        } else {
+            Pair(imageW, imageH)
+        }
+
+        // Scale to fit view maintaining aspect ratio (FILL_CENTER)
+        val scaleX = width.toFloat() / rotW
+        val scaleY = height.toFloat() / rotH
+        val scale = maxOf(scaleX, scaleY) // Use maxOf for FILL_CENTER
+
+        // Center the image in the view
+        val scaledW = rotW * scale
+        val scaledH = rotH * scale
+        val offsetX = (width - scaledW) / 2f
+        val offsetY = (height - scaledH) / 2f
+
+        val viewX = offsetX + rotX * scale
+        val viewY = offsetY + rotY * scale
+
+        return PointF(viewX, viewY)
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        if (imageW <= 0 || imageH <= 0 || width <= 0 || height <= 0) return
+
+        // Draw debug info
+        var yPos = 50f
+        canvas.drawText("Image: ${imageW}x${imageH}", 20f, yPos, textPaint)
+        yPos += 50f
+        canvas.drawText("View: ${width}x${height}", 20f, yPos, textPaint)
+        yPos += 50f
+        canvas.drawText("Rotation: $rotationDegrees°", 20f, yPos, textPaint)
+        yPos += 50f
+        canvas.drawText("Front Cam: $isFrontCamera", 20f, yPos, textPaint)
+        yPos += 50f
+
+        val (rotW, rotH) = if (rotationDegrees == 90 || rotationDegrees == 270) {
+            Pair(imageH, imageW)
+        } else {
+            Pair(imageW, imageH)
+        }
+        canvas.drawText("Rotated: ${rotW}x${rotH}", 20f, yPos, textPaint)
+        yPos += 50f
+
+        val scaleX = width.toFloat() / rotW
+        val scaleY = height.toFloat() / rotH
+        val scale = maxOf(scaleX, scaleY)
+        canvas.drawText("Scale: %.2f (x:%.2f y:%.2f)".format(scale, scaleX, scaleY), 20f, yPos, textPaint)
+        yPos += 50f
+
+        canvas.drawText("Faces: ${faces.size}", 20f, yPos, textPaint)
+        yPos += 50f
+        pose?.let {
+            canvas.drawText("Pose: ${it.allPoseLandmarks.size} landmarks", 20f, yPos, textPaint)
+            yPos += 50f
+        }
+        handResult?.let {
+            canvas.drawText("Hands: ${it.landmarks().size}", 20f, yPos, textPaint)
+        }
+
+        // Draw pose landmarks and skeleton
+        pose?.let { p ->
+            val landmarks = p.allPoseLandmarks.associateBy { it.landmarkType }
+
+            fun getLandmarkPoint(type: Int): PointF? {
+                val lm = landmarks[type] ?: return null
+                return mapImageToView(lm.position.x, lm.position.y)
+            }
+
+            // Draw skeleton connections
+            val connections = listOf(
+                PoseLandmark.LEFT_SHOULDER to PoseLandmark.LEFT_ELBOW,
+                PoseLandmark.LEFT_ELBOW to PoseLandmark.LEFT_WRIST,
+                PoseLandmark.RIGHT_SHOULDER to PoseLandmark.RIGHT_ELBOW,
+                PoseLandmark.RIGHT_ELBOW to PoseLandmark.RIGHT_WRIST,
+                PoseLandmark.LEFT_SHOULDER to PoseLandmark.RIGHT_SHOULDER,
+                PoseLandmark.LEFT_HIP to PoseLandmark.RIGHT_HIP,
+                PoseLandmark.LEFT_SHOULDER to PoseLandmark.LEFT_HIP,
+                PoseLandmark.RIGHT_SHOULDER to PoseLandmark.RIGHT_HIP,
+                PoseLandmark.LEFT_HIP to PoseLandmark.LEFT_KNEE,
+                PoseLandmark.LEFT_KNEE to PoseLandmark.LEFT_ANKLE,
+                PoseLandmark.RIGHT_HIP to PoseLandmark.RIGHT_KNEE,
+                PoseLandmark.RIGHT_KNEE to PoseLandmark.RIGHT_ANKLE
+            )
+
+            for ((start, end) in connections) {
+                val p1 = getLandmarkPoint(start)
+                val p2 = getLandmarkPoint(end)
+                if (p1 != null && p2 != null) {
+                    canvas.drawLine(p1.x, p1.y, p2.x, p2.y, poseLinePaint)
+                }
+            }
+
+            // Draw landmark points
+            for (lm in p.allPoseLandmarks) {
+                val pt = mapImageToView(lm.position.x, lm.position.y)
+                canvas.drawCircle(pt.x, pt.y, 10f, poseDotPaint)
+            }
+
+            // Highlight wrists
+            getLandmarkPoint(PoseLandmark.LEFT_WRIST)?.let {
+                canvas.drawCircle(it.x, it.y, 18f, wristPaint)
+            }
+            getLandmarkPoint(PoseLandmark.RIGHT_WRIST)?.let {
+                canvas.drawCircle(it.x, it.y, 18f, wristPaint)
+            }
+        }
+
+        // Draw face bounding boxes and contours
+        for (face in faces) {
+            val bbox = face.boundingBox
+            val topLeft = mapImageToView(bbox.left.toFloat(), bbox.top.toFloat())
+            val bottomRight = mapImageToView(bbox.right.toFloat(), bbox.bottom.toFloat())
+
+            val left = minOf(topLeft.x, bottomRight.x)
+            val top = minOf(topLeft.y, bottomRight.y)
+            val right = maxOf(topLeft.x, bottomRight.x)
+            val bottom = maxOf(topLeft.y, bottomRight.y)
+
+            canvas.drawRect(left, top, right, bottom, faceBboxPaint)
+
+            // Draw face contours
+            val contourTypes = listOf(
+                FaceContour.FACE,
+                FaceContour.LEFT_EYE,
+                FaceContour.RIGHT_EYE,
+                FaceContour.NOSE_BRIDGE,
+                FaceContour.UPPER_LIP_TOP,
+                FaceContour.LOWER_LIP_BOTTOM
+            )
+
+            for (contourType in contourTypes) {
+                face.getContour(contourType)?.points?.forEach { point ->
+                    val pt = mapImageToView(point.x, point.y)
+                    canvas.drawCircle(pt.x, pt.y, 5f, faceContourPaint)
+                }
+            }
+
+            // Draw emotion labels
+            val smile = face.smilingProbability
+            val leftEye = face.leftEyeOpenProbability
+            val rightEye = face.rightEyeOpenProbability
+
+            if (smile != null && smile > 0.5f) {
+                canvas.drawText("😊 ${(smile * 100).toInt()}%", left, top - 10f, textPaint)
+            }
+        }
+
+        // Draw hand landmarks
+        handResult?.let { result ->
+            val hands = result.landmarks()
+            for (handIdx in hands.indices) {
+                val hand = hands[handIdx]
+
+                // Draw hand connections
+                val connections = listOf(
+                    // Thumb
+                    0 to 1, 1 to 2, 2 to 3, 3 to 4,
+                    // Index
+                    0 to 5, 5 to 6, 6 to 7, 7 to 8,
+                    // Middle
+                    0 to 9, 9 to 10, 10 to 11, 11 to 12,
+                    // Ring
+                    0 to 13, 13 to 14, 14 to 15, 15 to 16,
+                    // Pinky
+                    0 to 17, 17 to 18, 18 to 19, 19 to 20,
+                    // Palm
+                    5 to 9, 9 to 13, 13 to 17
+                )
+
+                for ((start, end) in connections) {
+                    if (start < hand.size && end < hand.size) {
+                        val p1x = hand[start].x() * width
+                        val p1y = hand[start].y() * height
+                        val p2x = hand[end].x() * width
+                        val p2y = hand[end].y() * height
+                        canvas.drawLine(p1x, p1y, p2x, p2y, handLinePaint)
+                    }
+                }
+
+                // Draw hand landmarks
+                for (lm in hand) {
+                    val x = lm.x() * width
+                    val y = lm.y() * height
+                    canvas.drawCircle(x, y, 10f, handPaint)
+                }
+            }
+        }
+    }
+}
+
 object PoseKeywordExtractor {
-    fun extractPoseKeywords(pose: com.google.mlkit.vision.pose.Pose): List<String> {
+    fun extractPoseKeywords(pose: Pose): List<String> {
         val lm = pose.allPoseLandmarks.associateBy { it.landmarkType }
 
         fun y(type: Int): Float? = lm[type]?.position?.y
@@ -274,13 +675,11 @@ object PoseKeywordExtractor {
 
         val keywords = mutableListOf<String>()
 
-        // Basic: hands up / raised
-        val leftWristY = y(com.google.mlkit.vision.pose.PoseLandmark.LEFT_WRIST)
-        val rightWristY = y(com.google.mlkit.vision.pose.PoseLandmark.RIGHT_WRIST)
-        val leftShoulderY = y(com.google.mlkit.vision.pose.PoseLandmark.LEFT_SHOULDER)
-        val rightShoulderY = y(com.google.mlkit.vision.pose.PoseLandmark.RIGHT_SHOULDER)
+        val leftWristY = y(PoseLandmark.LEFT_WRIST)
+        val rightWristY = y(PoseLandmark.RIGHT_WRIST)
+        val leftShoulderY = y(PoseLandmark.LEFT_SHOULDER)
+        val rightShoulderY = y(PoseLandmark.RIGHT_SHOULDER)
 
-        // In image coordinates, smaller Y = higher on screen
         val leftHandUp = leftWristY != null && leftShoulderY != null && leftWristY < leftShoulderY
         val rightHandUp = rightWristY != null && rightShoulderY != null && rightWristY < rightShoulderY
 
@@ -288,11 +687,10 @@ object PoseKeywordExtractor {
         else if (leftHandUp) keywords += "left_hand_raised"
         else if (rightHandUp) keywords += "right_hand_raised"
 
-        // Arms wide (approx)
-        val leftWristX = x(com.google.mlkit.vision.pose.PoseLandmark.LEFT_WRIST)
-        val rightWristX = x(com.google.mlkit.vision.pose.PoseLandmark.RIGHT_WRIST)
-        val leftShoulderX = x(com.google.mlkit.vision.pose.PoseLandmark.LEFT_SHOULDER)
-        val rightShoulderX = x(com.google.mlkit.vision.pose.PoseLandmark.RIGHT_SHOULDER)
+        val leftWristX = x(PoseLandmark.LEFT_WRIST)
+        val rightWristX = x(PoseLandmark.RIGHT_WRIST)
+        val leftShoulderX = x(PoseLandmark.LEFT_SHOULDER)
+        val rightShoulderX = x(PoseLandmark.RIGHT_SHOULDER)
 
         if (leftWristX != null && rightWristX != null && leftShoulderX != null && rightShoulderX != null) {
             val shoulderWidth = abs(rightShoulderX - leftShoulderX)
@@ -302,12 +700,9 @@ object PoseKeywordExtractor {
             }
         }
 
-        // Simple: leaning left/right using shoulder slope
         if (leftShoulderY != null && rightShoulderY != null) {
             val diff = rightShoulderY - leftShoulderY
-            if (abs(diff) > 35f) { // tweak as needed per device resolution
-                keywords += if (diff > 0) "lean_left" else "lean_right"
-            }
+            if (abs(diff) > 35f) keywords += if (diff > 0) "lean_left" else "lean_right"
         }
 
         return keywords
@@ -315,10 +710,10 @@ object PoseKeywordExtractor {
 }
 
 object FaceKeywordExtractor {
-    fun extractFaceKeywords(faces: List<com.google.mlkit.vision.face.Face>): List<String> {
+    fun extractFaceKeywords(faces: List<Face>): List<String> {
         if (faces.isEmpty()) return emptyList()
+        val f = faces[0]
 
-        val f = faces[0] // just take the biggest/first for MVP
         val keywords = mutableListOf<String>()
 
         val smile = f.smilingProbability
@@ -328,16 +723,184 @@ object FaceKeywordExtractor {
         if (smile != null && smile > 0.7f) keywords += "smiling"
         if (leftEye != null && rightEye != null && leftEye < 0.2f && rightEye < 0.2f) keywords += "eyes_closed"
 
-        // Head direction (EulerY ~ left/right turn)
         val yaw = f.headEulerAngleY
         if (yaw > 15f) keywords += "looking_left"
         else if (yaw < -15f) keywords += "looking_right"
 
-        // EulerZ ~ tilt
         val roll = f.headEulerAngleZ
         if (roll > 15f) keywords += "head_tilt_right"
         else if (roll < -15f) keywords += "head_tilt_left"
 
         return keywords
     }
+}
+
+object HandKeywordExtractor {
+
+    private const val WRIST = 0
+    private const val THUMB_MCP = 2
+    private const val THUMB_TIP = 4
+    private const val INDEX_MCP = 5
+    private const val INDEX_PIP = 6
+    private const val INDEX_TIP = 8
+    private const val MIDDLE_PIP = 10
+    private const val MIDDLE_TIP = 12
+    private const val RING_PIP = 14
+    private const val RING_TIP = 16
+    private const val PINKY_PIP = 18
+    private const val PINKY_TIP = 20
+
+    fun extractHandKeywords(
+        result: HandLandmarkerResult?,
+        isFrontCameraMirrored: Boolean
+    ): List<String> {
+        if (result == null) return emptyList()
+        val hands = result.landmarks()
+        if (hands.isEmpty()) return emptyList()
+
+        val hand = hands[0]
+        if (hand.size < 21) return emptyList()
+
+        fun x(i: Int) = hand[i].x()
+        fun y(i: Int) = hand[i].y()
+        fun isFingerExtended(tip: Int, pip: Int): Boolean = y(tip) < y(pip)
+
+        val indexExt = isFingerExtended(INDEX_TIP, INDEX_PIP)
+        val middleExt = isFingerExtended(MIDDLE_TIP, MIDDLE_PIP)
+        val ringExt = isFingerExtended(RING_TIP, RING_PIP)
+        val pinkyExt = isFingerExtended(PINKY_TIP, PINKY_PIP)
+
+        val thumbExt =
+            distance(x(THUMB_TIP), y(THUMB_TIP), x(WRIST), y(WRIST)) >
+                    distance(x(THUMB_MCP), y(THUMB_MCP), x(WRIST), y(WRIST)) * 1.15f
+
+        val keywords = mutableListOf<String>()
+        keywords += "hand_detected"
+
+        val tipsAboveWrist =
+            (y(INDEX_TIP) < y(WRIST)) &&
+                    (y(MIDDLE_TIP) < y(WRIST)) &&
+                    (y(RING_TIP) < y(WRIST)) &&
+                    (y(PINKY_TIP) < y(WRIST))
+
+        val openPalm = indexExt && middleExt && ringExt && pinkyExt && thumbExt && tipsAboveWrist
+        if (openPalm) {
+            keywords += "open_palm"
+            keywords += "what_hand"
+        }
+
+        val pointing = indexExt && !middleExt && !ringExt && !pinkyExt
+        if (pointing) {
+            keywords += "pointing"
+            val dx = x(INDEX_TIP) - x(INDEX_MCP)
+            val dy = y(INDEX_TIP) - y(INDEX_MCP)
+
+            val dir = if (abs(dx) > abs(dy)) {
+                if (dx > 0) "right" else "left"
+            } else {
+                if (dy > 0) "down" else "up"
+            }
+
+            val correctedDir = when (dir) {
+                "left" -> if (isFrontCameraMirrored) "right" else "left"
+                "right" -> if (isFrontCameraMirrored) "left" else "right"
+                else -> dir
+            }
+            keywords += "point_$correctedDir"
+        }
+
+        return keywords.distinct()
+    }
+
+    private fun distance(ax: Float, ay: Float, bx: Float, by: Float): Float {
+        val dx = ax - bx
+        val dy = ay - by
+        return sqrt(dx * dx + dy * dy)
+    }
+}
+
+@OptIn(ExperimentalGetImage::class)
+private fun imageProxyToUprightBitmap(
+    imageProxy: ImageProxy,
+    rotationDegrees: Int,
+    mirrorX: Boolean
+): Bitmap {
+    val nv21 = yuv420888ToNv21(imageProxy)
+    val yuvImage = YuvImage(nv21, ImageFormat.NV21, imageProxy.width, imageProxy.height, null)
+
+    val out = ByteArrayOutputStream()
+    yuvImage.compressToJpeg(Rect(0, 0, imageProxy.width, imageProxy.height), 90, out)
+    val jpegBytes = out.toByteArray()
+
+    val rawBitmap = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size)
+        ?: Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
+
+    val matrix = Matrix().apply {
+        if (rotationDegrees != 0) postRotate(rotationDegrees.toFloat())
+        if (mirrorX) postScale(-1f, 1f)
+    }
+
+    val rotated = Bitmap.createBitmap(rawBitmap, 0, 0, rawBitmap.width, rawBitmap.height, matrix, true)
+    if (rotated != rawBitmap) rawBitmap.recycle()
+    return rotated
+}
+
+private fun yuv420888ToNv21(image: ImageProxy): ByteArray {
+    val width = image.width
+    val height = image.height
+
+    val yPlane = image.planes[0]
+    val uPlane = image.planes[1]
+    val vPlane = image.planes[2]
+
+    val yBuffer = yPlane.buffer
+    val uBuffer = uPlane.buffer
+    val vBuffer = vPlane.buffer
+
+    yBuffer.rewind()
+    uBuffer.rewind()
+    vBuffer.rewind()
+
+    val ySize = width * height
+    val uvSize = width * height / 2
+    val out = ByteArray(ySize + uvSize)
+
+    var outIndex = 0
+    val yRowStride = yPlane.rowStride
+    val yPixelStride = yPlane.pixelStride
+    for (row in 0 until height) {
+        val rowStart = row * yRowStride
+        for (col in 0 until width) {
+            out[outIndex++] = yBuffer.get(rowStart + col * yPixelStride)
+        }
+    }
+
+    val chromaWidth = width / 2
+    val chromaHeight = height / 2
+    val uRowStride = uPlane.rowStride
+    val vRowStride = vPlane.rowStride
+    val uPixelStride = uPlane.pixelStride
+    val vPixelStride = vPlane.pixelStride
+
+    for (row in 0 until chromaHeight) {
+        val uRowStart = row * uRowStride
+        val vRowStart = row * vRowStride
+        for (col in 0 until chromaWidth) {
+            val uIndex = uRowStart + col * uPixelStride
+            val vIndex = vRowStart + col * vPixelStride
+            out[outIndex++] = vBuffer.get(vIndex) // V
+            out[outIndex++] = uBuffer.get(uIndex) // U
+        }
+    }
+
+    return out
+}
+
+fun View.toBitmap(): Bitmap {
+    val w = width.coerceAtLeast(1)
+    val h = height.coerceAtLeast(1)
+    val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bitmap)
+    draw(canvas)
+    return bitmap
 }
