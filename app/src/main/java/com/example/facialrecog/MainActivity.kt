@@ -176,6 +176,10 @@ fun CameraPreview(
     val lifecycleOwner = LocalLifecycleOwner.current
     val context = LocalContext.current
 
+    // Avoid stale lambdas inside camera callbacks
+    val onKeywordsState by rememberUpdatedState(onKeywords)
+    val showDebugState by rememberUpdatedState(showDebug)
+
     val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
 
     val poseDetector = remember {
@@ -212,11 +216,10 @@ fun CameraPreview(
         }
     }
 
+    // Hold references created in AndroidView
+    val previewViewRef = remember { mutableStateOf<PreviewView?>(null) }
     val debugViewRef = remember { mutableStateOf<DebugLandmarkView?>(null) }
-
-    LaunchedEffect(showDebug) {
-        debugViewRef.value?.visibility = if (showDebug) View.VISIBLE else View.GONE
-    }
+    val cameraProviderRef = remember { mutableStateOf<ProcessCameraProvider?>(null) }
 
     AndroidView(
         modifier = modifier,
@@ -227,6 +230,7 @@ fun CameraPreview(
                 scaleType = PreviewView.ScaleType.FILL_CENTER
                 implementationMode = PreviewView.ImplementationMode.COMPATIBLE
             }
+            previewViewRef.value = previewView
 
             val debugView = DebugLandmarkView(ctx).apply {
                 visibility = if (showDebug) View.VISIBLE else View.GONE
@@ -248,9 +252,11 @@ fun CameraPreview(
                 )
             )
 
+            // Setup camera once
             val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
             cameraProviderFuture.addListener({
                 val cameraProvider = cameraProviderFuture.get()
+                cameraProviderRef.value = cameraProvider
 
                 val preview = Preview.Builder().build().also {
                     it.setSurfaceProvider(previewView.surfaceProvider)
@@ -313,9 +319,10 @@ fun CameraPreview(
                                         if (handKeywords.isNotEmpty()) append(", handKW=${handKeywords.joinToString("|")}")
                                     }
 
-                                    onKeywords(merged, dbg)
+                                    onKeywordsState(merged, dbg)
 
-                                    if (showDebug) {
+                                    // IMPORTANT: only draw overlay when debug is ON
+                                    if (showDebugState) {
                                         debugView.post {
                                             debugView.visibility = View.VISIBLE
                                             debugView.update(
@@ -328,17 +335,12 @@ fun CameraPreview(
                                                 isFrontCamera = isFrontCamera
                                             )
                                         }
-                                    } else {
-                                        debugView.post {
-                                            debugView.visibility = View.GONE
-                                        }
                                     }
                                 }
                                 .addOnFailureListener {
                                     val merged = (poseKeywords + handKeywords).distinct()
                                         .ifEmpty { listOf("pose_and_hand_only") }
-                                    onKeywords(merged, "Face failed: ${it.javaClass.simpleName}")
-                                    debugView.post { debugView.visibility = View.GONE }
+                                    onKeywordsState(merged, "Face failed: ${it.javaClass.simpleName}")
                                 }
                                 .addOnCompleteListener {
                                     imageProxy.close()
@@ -346,8 +348,7 @@ fun CameraPreview(
                         }
                         .addOnFailureListener {
                             val merged = handKeywords.ifEmpty { listOf("pose_failed") }
-                            onKeywords(merged, "Pose failed: ${it.javaClass.simpleName}")
-                            debugView.post { debugView.visibility = View.GONE }
+                            onKeywordsState(merged, "Pose failed: ${it.javaClass.simpleName}")
                             imageProxy.close()
                         }
                 }
@@ -361,14 +362,32 @@ fun CameraPreview(
                         analysis
                     )
                 } catch (e: Exception) {
-                    onKeywords(listOf("camera_bind_failed"), "Camera bind failed: ${e.message}")
+                    onKeywordsState(listOf("camera_bind_failed"), "Camera bind failed: ${e.message}")
                 }
             }, ContextCompat.getMainExecutor(ctx))
 
             container
+        },
+        // ✅ This runs every recomposition: toggles overlay reliably
+        update = { _ ->
+            debugViewRef.value?.visibility = if (showDebug) View.VISIBLE else View.GONE
         }
     )
+
+    // Clean up resources
+    DisposableEffect(Unit) {
+        onDispose {
+            try {
+                cameraProviderRef.value?.unbindAll()
+            } catch (_: Exception) {}
+
+            try {
+                cameraExecutor.shutdown()
+            } catch (_: Exception) {}
+        }
+    }
 }
+
 
 class DebugLandmarkView(context: android.content.Context) : View(context) {
 
