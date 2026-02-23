@@ -478,43 +478,32 @@ class DebugLandmarkView(context: android.content.Context) : View(context) {
             return PointF(0f, 0f)
         }
 
-        // For front camera, ML Kit coordinates are already mirrored in the X axis
-        // We need to mirror them back before rotation, then apply preview mirroring
-        var x = if (isFrontCamera) imageW - imgX else imgX
-        var y = imgY
-
-        // Apply rotation transformation
-        val (rotX, rotY) = when (rotationDegrees) {
-            90 -> Pair(imageH - y, x)
-            180 -> Pair(imageW - x, imageH - y)
-            270 -> Pair(y, imageW - x)
-            else -> Pair(x, y)
-        }
-
-        // Get rotated dimensions
-        val (rotW, rotH) = if (rotationDegrees == 90 || rotationDegrees == 270) {
-            Pair(imageH, imageW)
+        // ML Kit returns coords already rotated into upright space.
+        // The upright dimensions after rotation:
+        val (uprightW, uprightH) = if (rotationDegrees == 90 || rotationDegrees == 270) {
+            Pair(imageH.toFloat(), imageW.toFloat())
         } else {
-            Pair(imageW, imageH)
+            Pair(imageW.toFloat(), imageH.toFloat())
         }
 
-        // Scale to fit view maintaining aspect ratio (FILL_CENTER)
-        val scaleX = width.toFloat() / rotW
-        val scaleY = height.toFloat() / rotH
-        val scale = maxOf(scaleX, scaleY) // Use maxOf for FILL_CENTER
+        // For front camera, ML Kit mirrors X relative to the upright image width
+        val finalX = if (isFrontCamera) uprightW - imgX else imgX
+        val finalY = imgY
 
-        // Center the image in the view
-        val scaledW = rotW * scale
-        val scaledH = rotH * scale
-        val offsetX = (width - scaledW) / 2f
-        val offsetY = (height - scaledH) / 2f
+        // Scale to view using FILL_CENTER
+        val scaleX = width.toFloat() / uprightW
+        val scaleY = height.toFloat() / uprightH
+        val scale = maxOf(scaleX, scaleY)
 
-        val viewX = offsetX + rotX * scale
-        val viewY = offsetY + rotY * scale
+        val offsetX = (width - uprightW * scale) / 2f
+        val offsetY = (height - uprightH * scale) / 2f
 
-        return PointF(viewX, viewY)
+        return PointF(
+            offsetX + finalX * scale,
+            offsetY + finalY * scale
+        )
     }
-
+    
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         if (imageW <= 0 || imageH <= 0 || width <= 0 || height <= 0) return
