@@ -51,6 +51,7 @@ import java.io.ByteArrayOutputStream
 import java.util.concurrent.Executors
 import kotlin.math.abs
 import kotlin.math.sqrt
+import androidx.compose.ui.graphics.asImageBitmap
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -67,6 +68,22 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+// Add this object anywhere in MainActivity.kt
+object OverlayAssetResolver {
+    private val KEYWORD_TO_DRAWABLE = linkedMapOf(
+        "smiling"     to R.drawable.overlay_crown,
+        "angry" to R.drawable.overlay_glasses,
+        "hands_up"    to R.drawable.overlay_mustache,
+    )
+
+    fun resolve(keywords: List<String>): Int? =
+        keywords.firstNotNullOfOrNull { kw -> KEYWORD_TO_DRAWABLE[kw] }
+
+    fun loadBitmap(context: android.content.Context, drawableRes: Int): Bitmap? =
+        try {
+            BitmapFactory.decodeResource(context.resources, drawableRes)
+        } catch (_: Exception) { null }
+}
 @Composable
 fun PoseExpressionApp() {
     val context = LocalContext.current
@@ -153,15 +170,26 @@ fun PoseExpressionApp() {
 
         Spacer(Modifier.height(12.dp))
 
-        OutlinedButton(
-            modifier = Modifier.fillMaxWidth(),
-            onClick = {
-                val query = keywords.joinToString(" ")
-                val url = "https://www.google.com/search?tbm=isch&q=" + Uri.encode(query)
-                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-            }
-        ) {
-            Text("Search Online")
+// Replace the OutlinedButton block with this:
+        val context = LocalContext.current
+        val assetPath = remember(keywords) { OverlayAssetResolver.resolve(keywords) }
+        val overlayBitmap = remember(assetPath) {
+            assetPath?.let { OverlayAssetResolver.loadBitmap(context, it) }
+        }
+
+        if (overlayBitmap != null) {
+            androidx.compose.foundation.Image(
+                bitmap = overlayBitmap.asImageBitmap(),
+                contentDescription = "Pose overlay",
+                modifier = Modifier
+                    .size(160.dp)
+                    .align(Alignment.CenterHorizontally)
+            )
+        } else {
+            Text(
+                "No overlay for: ${keywords.firstOrNull()}",
+                style = MaterialTheme.typography.bodySmall
+            )
         }
     }
 }
@@ -503,7 +531,7 @@ class DebugLandmarkView(context: android.content.Context) : View(context) {
             offsetY + finalY * scale
         )
     }
-    
+
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         if (imageW <= 0 || imageH <= 0 || width <= 0 || height <= 0) return
@@ -718,26 +746,147 @@ object PoseKeywordExtractor {
 }
 
 object FaceKeywordExtractor {
+
     fun extractFaceKeywords(faces: List<Face>): List<String> {
         if (faces.isEmpty()) return emptyList()
         val f = faces[0]
-
         val keywords = mutableListOf<String>()
 
-        val smile = f.smilingProbability
-        val leftEye = f.leftEyeOpenProbability
-        val rightEye = f.rightEyeOpenProbability
+        val smile    = f.smilingProbability ?: 0f
+        val leftEye  = f.leftEyeOpenProbability ?: 1f
+        val rightEye = f.rightEyeOpenProbability ?: 1f
+        val yaw      = f.headEulerAngleY  // left/right turn
+        val pitch    = f.headEulerAngleX  // up/down tilt
+        val roll     = f.headEulerAngleZ  // head tilt
 
-        if (smile != null && smile > 0.7f) keywords += "smiling"
-        if (leftEye != null && rightEye != null && leftEye < 0.2f && rightEye < 0.2f) keywords += "eyes_closed"
-
-        val yaw = f.headEulerAngleY
-        if (yaw > 15f) keywords += "looking_left"
-        else if (yaw < -15f) keywords += "looking_right"
-
-        val roll = f.headEulerAngleZ
-        if (roll > 15f) keywords += "head_tilt_right"
+        // --- Head orientation ---
+        if (yaw > 20f)       keywords += "looking_left"
+        else if (yaw < -20f) keywords += "looking_right"
+        if (pitch > 15f)     keywords += "looking_up"
+        else if (pitch < -15f) keywords += "looking_down"
+        if (roll > 15f)      keywords += "head_tilt_right"
         else if (roll < -15f) keywords += "head_tilt_left"
+
+        // --- Eye state ---
+        val bothEyesClosed = leftEye < 0.2f && rightEye < 0.2f
+        val eyesWideOpen   = leftEye > 0.85f && rightEye > 0.85f
+        if (bothEyesClosed) keywords += "eyes_closed"
+        if (eyesWideOpen)   keywords += "eyes_wide"
+
+        // --- Geometry-based emotion inference from contours ---
+        val mouthPoints  = f.getContour(com.google.mlkit.vision.face.FaceContour.LOWER_LIP_BOTTOM)?.points
+        val upperLip     = f.getContour(com.google.mlkit.vision.face.FaceContour.UPPER_LIP_TOP)?.points
+        val faceContour  = f.getContour(com.google.mlkit.vision.face.FaceContour.FACE)?.points
+        val leftBrow     = f.getContour(com.google.mlkit.vision.face.FaceContour.LEFT_EYEBROW_TOP)?.points
+        val rightBrow    = f.getContour(com.google.mlkit.vision.face.FaceContour.RIGHT_EYEBROW_TOP)?.points
+        val leftEyePts   = f.getContour(com.google.mlkit.vision.face.FaceContour.LEFT_EYE)?.points
+        val rightEyePts  = f.getContour(com.google.mlkit.vision.face.FaceContour.RIGHT_EYE)?.points
+
+        // Mouth openness: gap between upper and lower lip center
+        val mouthOpen = if (mouthPoints != null && upperLip != null && mouthPoints.isNotEmpty() && upperLip.isNotEmpty()) {
+            val lowerY = mouthPoints[mouthPoints.size / 2].y
+            val upperY = upperLip[upperLip.size / 2].y
+            lowerY - upperY  // positive = open
+        } else null
+
+        // Mouth corner direction: are corners up (smile) or down (sad)?
+        // Lower lip contour: first and last points are the corners
+        val mouthCurve = if (mouthPoints != null && mouthPoints.size >= 3) {
+            val leftCornerY  = mouthPoints.first().y
+            val rightCornerY = mouthPoints.last().y
+            val centerY      = mouthPoints[mouthPoints.size / 2].y
+            // Positive = corners higher than center = smile curve
+            // Negative = corners lower than center = frown
+            ((leftCornerY + rightCornerY) / 2f) - centerY
+        } else null
+
+        // Eyebrow height relative to face: raised = surprise/fear, lowered = anger
+        val browRaise = if (leftBrow != null && rightBrow != null && faceContour != null && faceContour.size >= 10) {
+            val faceTopY   = faceContour.minOf { it.y }
+            val faceCenterY = faceContour.maxOf { it.y }
+            val faceHeight = faceCenterY - faceTopY
+            val leftBrowY  = leftBrow.minOf { it.y }
+            val rightBrowY = rightBrow.minOf { it.y }
+            val avgBrowY   = (leftBrowY + rightBrowY) / 2f
+            // Normalized: 0 = brow at top of face, 1 = brow at bottom
+            // Lower value = higher brow (raised)
+            (avgBrowY - faceTopY) / faceHeight
+        } else null
+
+        // Eyebrow inner corners: furrowed brows (inner corners pulled down/together) = anger/worry
+        val browFurrow = if (leftBrow != null && rightBrow != null && leftBrow.isNotEmpty() && rightBrow.isNotEmpty()) {
+            // Inner corner of left brow (rightmost point) vs outer (leftmost)
+            val leftInnerY  = leftBrow.maxByOrNull { it.x }?.y ?: 0f
+            val leftOuterY  = leftBrow.minByOrNull { it.x }?.y ?: 0f
+            val rightInnerY = rightBrow.minByOrNull { it.x }?.y ?: 0f
+            val rightOuterY = rightBrow.maxByOrNull { it.x }?.y ?: 0f
+            // Positive = inner corners lower than outer = furrowed
+            ((leftInnerY - leftOuterY) + (rightInnerY - rightOuterY)) / 2f
+        } else null
+
+        // Eye openness ratio from contour points
+        val eyeOpenRatio = if (leftEyePts != null && leftEyePts.size >= 4) {
+            val eyeHeight = leftEyePts.maxOf { it.y } - leftEyePts.minOf { it.y }
+            val eyeWidth  = leftEyePts.maxOf { it.x } - leftEyePts.minOf { it.x }
+            if (eyeWidth > 0) eyeHeight / eyeWidth else null
+        } else null
+
+        // --- Classify emotions ---
+
+        // SURPRISED: mouth open + eyebrows raised + eyes wide
+        val isSurprised = (mouthOpen != null && mouthOpen > 15f) &&
+                (browRaise != null && browRaise < 0.25f) &&
+                eyesWideOpen
+        if (isSurprised) {
+            keywords += "surprised"
+        }
+
+        // HAPPY / SMILING: ML Kit smile score OR mouth curve upward
+        val isSmiling = smile > 0.65f || (mouthCurve != null && mouthCurve < -8f && smile > 0.3f)
+        if (isSmiling && !isSurprised) {
+            keywords += "smiling"
+        }
+
+        // SAD: mouth corners down + brows may be slightly raised inner
+        val isSad = (mouthCurve != null && mouthCurve > 10f) &&
+                smile < 0.3f &&
+                !bothEyesClosed
+        if (isSad) {
+            keywords += "sad"
+        }
+
+        // ANGRY: furrowed brows + low smile + eyes not wide
+        val isAngry = (browFurrow != null && browFurrow > 8f) &&
+                smile < 0.2f &&
+                (browRaise == null || browRaise > 0.28f) && // brows NOT raised
+                !eyesWideOpen
+        if (isAngry) {
+            keywords += "angry"
+        }
+
+        // DISGUSTED: similar to angry but with mouth open slightly + nose wrinkle
+        // (ML Kit doesn't give nose wrinkle, approximate with furrowed brow + slight mouth open)
+        val isDisgusted = (browFurrow != null && browFurrow > 5f) &&
+                (mouthOpen != null && mouthOpen in 3f..15f) &&
+                smile < 0.2f
+        if (isDisgusted && !isAngry) {
+            keywords += "disgusted"
+        }
+
+        // FEARFUL: eyes wide + brows raised + mouth slightly open
+        val isFearful = eyesWideOpen &&
+                (browRaise != null && browRaise < 0.22f) &&
+                (mouthOpen != null && mouthOpen > 5f) &&
+                smile < 0.3f &&
+                !isSurprised
+        if (isFearful) {
+            keywords += "fearful"
+        }
+
+        // NEUTRAL: nothing else triggered
+        if (keywords.none { it in listOf("smiling","sad","angry","surprised","disgusted","fearful") }) {
+            keywords += "neutral"
+        }
 
         return keywords
     }
@@ -746,15 +895,19 @@ object FaceKeywordExtractor {
 object HandKeywordExtractor {
 
     private const val WRIST = 0
+    private const val THUMB_CMC = 1
     private const val THUMB_MCP = 2
     private const val THUMB_TIP = 4
     private const val INDEX_MCP = 5
     private const val INDEX_PIP = 6
     private const val INDEX_TIP = 8
+    private const val MIDDLE_MCP = 9
     private const val MIDDLE_PIP = 10
     private const val MIDDLE_TIP = 12
+    private const val RING_MCP = 13
     private const val RING_PIP = 14
     private const val RING_TIP = 16
+    private const val PINKY_MCP = 17
     private const val PINKY_PIP = 18
     private const val PINKY_TIP = 20
 
@@ -766,63 +919,88 @@ object HandKeywordExtractor {
         val hands = result.landmarks()
         if (hands.isEmpty()) return emptyList()
 
-        val hand = hands[0]
-        if (hand.size < 21) return emptyList()
-
-        fun x(i: Int) = hand[i].x()
-        fun y(i: Int) = hand[i].y()
-        fun isFingerExtended(tip: Int, pip: Int): Boolean = y(tip) < y(pip)
-
-        val indexExt = isFingerExtended(INDEX_TIP, INDEX_PIP)
-        val middleExt = isFingerExtended(MIDDLE_TIP, MIDDLE_PIP)
-        val ringExt = isFingerExtended(RING_TIP, RING_PIP)
-        val pinkyExt = isFingerExtended(PINKY_TIP, PINKY_PIP)
-
-        val thumbExt =
-            distance(x(THUMB_TIP), y(THUMB_TIP), x(WRIST), y(WRIST)) >
-                    distance(x(THUMB_MCP), y(THUMB_MCP), x(WRIST), y(WRIST)) * 1.15f
-
         val keywords = mutableListOf<String>()
         keywords += "hand_detected"
 
-        val tipsAboveWrist =
-            (y(INDEX_TIP) < y(WRIST)) &&
-                    (y(MIDDLE_TIP) < y(WRIST)) &&
-                    (y(RING_TIP) < y(WRIST)) &&
-                    (y(PINKY_TIP) < y(WRIST))
+        val hand = hands[0]
+        if (hand.size < 21) return keywords
 
-        val openPalm = indexExt && middleExt && ringExt && pinkyExt && thumbExt && tipsAboveWrist
-        if (openPalm) {
-            keywords += "open_palm"
-            keywords += "what_hand"
+        fun x(i: Int) = hand[i].x()
+        fun y(i: Int) = hand[i].y()
+
+        // Finger extended: tip is further from wrist than pip, using distance
+        // This works regardless of hand orientation (sideways, up, down)
+        fun isExtended(tip: Int, pip: Int, mcp: Int): Boolean {
+            val wristDist = { i: Int -> distance(x(i), y(i), x(WRIST), y(WRIST)) }
+            return wristDist(tip) > wristDist(pip) && wristDist(pip) > wristDist(mcp) * 0.85f
         }
 
-        val pointing = indexExt && !middleExt && !ringExt && !pinkyExt
-        if (pointing) {
+        val indexExt  = isExtended(INDEX_TIP,  INDEX_PIP,  INDEX_MCP)
+        val middleExt = isExtended(MIDDLE_TIP, MIDDLE_PIP, MIDDLE_MCP)
+        val ringExt   = isExtended(RING_TIP,   RING_PIP,   RING_MCP)
+        val pinkyExt  = isExtended(PINKY_TIP,  PINKY_PIP,  PINKY_MCP)
+
+        // Thumb: extended if tip is far from index MCP (avoids confusion with palm)
+        val thumbExt = distance(x(THUMB_TIP), y(THUMB_TIP), x(INDEX_MCP), y(INDEX_MCP)) >
+                distance(x(THUMB_MCP), y(THUMB_MCP), x(INDEX_MCP), y(INDEX_MCP)) * 0.9f
+
+        val extendedCount = listOf(indexExt, middleExt, ringExt, pinkyExt).count { it }
+
+        // Open palm: all 4 fingers extended
+        if (extendedCount == 4) {
+            keywords += "open_palm"
+        }
+
+        // Fist: no fingers extended
+        if (extendedCount == 0 && !thumbExt) {
+            keywords += "fist"
+        }
+
+        // Thumbs up: only thumb extended, fist otherwise
+        if (thumbExt && extendedCount == 0) {
+            keywords += "thumbs_up"
+        }
+
+        // Thumbs down: thumb extended downward
+        if (thumbExt && extendedCount == 0 && y(THUMB_TIP) > y(WRIST)) {
+            keywords += "thumbs_down"
+        }
+
+        // Pointing: only index extended
+        if (indexExt && !middleExt && !ringExt && !pinkyExt) {
             keywords += "pointing"
             val dx = x(INDEX_TIP) - x(INDEX_MCP)
             val dy = y(INDEX_TIP) - y(INDEX_MCP)
-
             val dir = if (abs(dx) > abs(dy)) {
                 if (dx > 0) "right" else "left"
             } else {
                 if (dy > 0) "down" else "up"
             }
-
             val correctedDir = when (dir) {
-                "left" -> if (isFrontCameraMirrored) "right" else "left"
-                "right" -> if (isFrontCameraMirrored) "left" else "right"
-                else -> dir
+                "left"  -> if (isFrontCameraMirrored) "right" else "left"
+                "right" -> if (isFrontCameraMirrored) "left"  else "right"
+                else    -> dir
             }
             keywords += "point_$correctedDir"
+        }
+
+        // Peace / Victory sign: index + middle extended only
+        if (indexExt && middleExt && !ringExt && !pinkyExt) {
+            keywords += "peace_sign"
+        }
+
+        // OK sign: thumb tip close to index tip, other fingers extended
+        val thumbIndexDist = distance(x(THUMB_TIP), y(THUMB_TIP), x(INDEX_TIP), y(INDEX_TIP))
+        val handSize = distance(x(WRIST), y(WRIST), x(MIDDLE_MCP), y(MIDDLE_MCP))
+        if (thumbIndexDist < handSize * 0.35f && middleExt && ringExt && pinkyExt) {
+            keywords += "ok_sign"
         }
 
         return keywords.distinct()
     }
 
     private fun distance(ax: Float, ay: Float, bx: Float, by: Float): Float {
-        val dx = ax - bx
-        val dy = ay - by
+        val dx = ax - bx; val dy = ay - by
         return sqrt(dx * dx + dy * dy)
     }
 }
