@@ -70,14 +70,23 @@ class MainActivity : ComponentActivity() {
 
 // Add this object anywhere in MainActivity.kt
 object OverlayAssetResolver {
-    private val KEYWORD_TO_DRAWABLE = linkedMapOf(
-        "smiling"     to R.drawable.overlay_crown,
-        "angry" to R.drawable.overlay_glasses,
-        "hands_up"    to R.drawable.overlay_mustache,
+
+    private val KEYWORD_TO_DRAWABLE = mapOf(
+        "smiling"    to R.drawable.overlay_crown,
+        "peace_sign" to R.drawable.peace,
+        "hands_up"   to R.drawable.absolutecinema,
+        "pinky_up"   to R.drawable.pinky,
+        "four_fingers"       to R.drawable.four,
+        "double_gun" to R.drawable.crashout1,
     )
 
-    fun resolve(keywords: List<String>): Int? =
-        keywords.firstNotNullOfOrNull { kw -> KEYWORD_TO_DRAWABLE[kw] }
+    fun resolve(keywords: List<String>): Int? {
+        val keywordSet = keywords.toHashSet()
+        for ((keyword, drawable) in KEYWORD_TO_DRAWABLE) {
+            if (keyword in keywordSet) return drawable
+        }
+        return null
+    }
 
     fun loadBitmap(context: android.content.Context, drawableRes: Int): Bitmap? =
         try {
@@ -170,11 +179,12 @@ fun PoseExpressionApp() {
 
         Spacer(Modifier.height(12.dp))
 
-// Replace the OutlinedButton block with this:
-        val context = LocalContext.current
-        val assetPath = remember(keywords) { OverlayAssetResolver.resolve(keywords) }
-        val overlayBitmap = remember(assetPath) {
-            assetPath?.let { OverlayAssetResolver.loadBitmap(context, it) }
+        val resolvedRes = remember(keywords) { OverlayAssetResolver.resolve(keywords) }
+        val overlayBitmap = remember(resolvedRes) {
+            resolvedRes?.let {
+                try { BitmapFactory.decodeResource((context as android.app.Activity).resources, it) }
+                catch (_: Exception) { null }
+            }
         }
 
         if (overlayBitmap != null) {
@@ -187,7 +197,7 @@ fun PoseExpressionApp() {
             )
         } else {
             Text(
-                "No overlay for: ${keywords.firstOrNull()}",
+                text = "Active: ${keywords.filter { it != "hand_detected" && it != "neutral" }.joinToString(", ").ifEmpty { "none" }}",
                 style = MaterialTheme.typography.bodySmall
             )
         }
@@ -442,11 +452,16 @@ class DebugLandmarkView(context: android.content.Context) : View(context) {
         isAntiAlias = true
     }
 
-    private val poseDotPaint = Paint().apply {
+    private val browPaint = Paint().apply {
         style = Paint.Style.FILL
-        color = Color.CYAN
+        color = Color.rgb(255, 165, 0) // Orange — distinct from yellow face dots
         isAntiAlias = true
     }
+    //private val poseDotPaint = Paint().apply {
+    //    style = Paint.Style.FILL
+    //    color = Color.CYAN
+    //    isAntiAlias = true
+    //}
 
     private val poseLinePaint = Paint().apply {
         style = Paint.Style.STROKE
@@ -605,10 +620,10 @@ class DebugLandmarkView(context: android.content.Context) : View(context) {
             }
 
             // Draw landmark points
-            for (lm in p.allPoseLandmarks) {
-                val pt = mapImageToView(lm.position.x, lm.position.y)
-                canvas.drawCircle(pt.x, pt.y, 10f, poseDotPaint)
-            }
+            //for (lm in p.allPoseLandmarks) {
+            //    val pt = mapImageToView(lm.position.x, lm.position.y)
+            //    canvas.drawCircle(pt.x, pt.y, 10f, poseDotPaint)
+            //}
 
             // Highlight wrists
             getLandmarkPoint(PoseLandmark.LEFT_WRIST)?.let {
@@ -637,15 +652,50 @@ class DebugLandmarkView(context: android.content.Context) : View(context) {
                 FaceContour.FACE,
                 FaceContour.LEFT_EYE,
                 FaceContour.RIGHT_EYE,
+                FaceContour.LEFT_EYEBROW_TOP,       // ← add
+                FaceContour.LEFT_EYEBROW_BOTTOM,    // ← add
+                FaceContour.RIGHT_EYEBROW_TOP,      // ← add
+                FaceContour.RIGHT_EYEBROW_BOTTOM,   // ← add
                 FaceContour.NOSE_BRIDGE,
+                FaceContour.NOSE_BOTTOM,            // ← add
                 FaceContour.UPPER_LIP_TOP,
-                FaceContour.LOWER_LIP_BOTTOM
+                FaceContour.UPPER_LIP_BOTTOM,       // ← add
+                FaceContour.LOWER_LIP_TOP,          // ← add
+                FaceContour.LOWER_LIP_BOTTOM,
             )
 
-            for (contourType in contourTypes) {
+// Replace the single contour loop with this:
+            val generalContours = listOf(
+                FaceContour.FACE,
+                FaceContour.LEFT_EYE,
+                FaceContour.RIGHT_EYE,
+                FaceContour.NOSE_BRIDGE,
+                FaceContour.NOSE_BOTTOM,
+                FaceContour.UPPER_LIP_TOP,
+                FaceContour.UPPER_LIP_BOTTOM,
+                FaceContour.LOWER_LIP_TOP,
+                FaceContour.LOWER_LIP_BOTTOM,
+            )
+
+            for (contourType in generalContours) {
                 face.getContour(contourType)?.points?.forEach { point ->
                     val pt = mapImageToView(point.x, point.y)
-                    canvas.drawCircle(pt.x, pt.y, 5f, faceContourPaint)
+                    canvas.drawCircle(pt.x, pt.y, 5f, faceContourPaint) // yellow
+                }
+            }
+
+// Draw brows in orange so you can see them clearly
+            val browContours = listOf(
+                FaceContour.LEFT_EYEBROW_TOP,
+                FaceContour.LEFT_EYEBROW_BOTTOM,
+                FaceContour.RIGHT_EYEBROW_TOP,
+                FaceContour.RIGHT_EYEBROW_BOTTOM,
+            )
+
+            for (contourType in browContours) {
+                face.getContour(contourType)?.points?.forEach { point ->
+                    val pt = mapImageToView(point.x, point.y)
+                    canvas.drawCircle(pt.x, pt.y, 8f, browPaint) // larger + orange
                 }
             }
 
@@ -768,10 +818,10 @@ object FaceKeywordExtractor {
         else if (roll < -15f) keywords += "head_tilt_left"
 
         // --- Eye state ---
-        val bothEyesClosed = leftEye < 0.2f && rightEye < 0.2f
-        val eyesWideOpen   = leftEye > 0.85f && rightEye > 0.85f
-        if (bothEyesClosed) keywords += "eyes_closed"
-        if (eyesWideOpen)   keywords += "eyes_wide"
+        //val bothEyesClosed = leftEye < 0.2f && rightEye < 0.2f
+        //val eyesWideOpen   = leftEye > 0.85f && rightEye > 0.85f
+        //if (bothEyesClosed) keywords += "eyes_closed"
+        //if (eyesWideOpen)   keywords += "eyes_wide"
 
         // --- Geometry-based emotion inference from contours ---
         val mouthPoints  = f.getContour(com.google.mlkit.vision.face.FaceContour.LOWER_LIP_BOTTOM)?.points
@@ -835,8 +885,7 @@ object FaceKeywordExtractor {
 
         // SURPRISED: mouth open + eyebrows raised + eyes wide
         val isSurprised = (mouthOpen != null && mouthOpen > 15f) &&
-                (browRaise != null && browRaise < 0.25f) &&
-                eyesWideOpen
+                (browRaise != null && browRaise < 0.25f)
         if (isSurprised) {
             keywords += "surprised"
         }
@@ -849,8 +898,7 @@ object FaceKeywordExtractor {
 
         // SAD: mouth corners down + brows may be slightly raised inner
         val isSad = (mouthCurve != null && mouthCurve > 10f) &&
-                smile < 0.3f &&
-                !bothEyesClosed
+                smile < 0.3f
         if (isSad) {
             keywords += "sad"
         }
@@ -858,8 +906,7 @@ object FaceKeywordExtractor {
         // ANGRY: furrowed brows + low smile + eyes not wide
         val isAngry = (browFurrow != null && browFurrow > 8f) &&
                 smile < 0.2f &&
-                (browRaise == null || browRaise > 0.28f) && // brows NOT raised
-                !eyesWideOpen
+                (browRaise == null || browRaise > 0.28f)
         if (isAngry) {
             keywords += "angry"
         }
@@ -874,7 +921,7 @@ object FaceKeywordExtractor {
         }
 
         // FEARFUL: eyes wide + brows raised + mouth slightly open
-        val isFearful = eyesWideOpen &&
+        val isFearful =
                 (browRaise != null && browRaise < 0.22f) &&
                 (mouthOpen != null && mouthOpen > 5f) &&
                 smile < 0.3f &&
@@ -920,7 +967,7 @@ object HandKeywordExtractor {
         if (hands.isEmpty()) return emptyList()
 
         val keywords = mutableListOf<String>()
-        keywords += "hand_detected"
+        //keywords += "hand_detected"
 
         val hand = hands[0]
         if (hand.size < 21) return keywords
@@ -948,7 +995,7 @@ object HandKeywordExtractor {
 
         // Open palm: all 4 fingers extended
         if (extendedCount == 4) {
-            keywords += "open_palm"
+            keywords += "four_fingers"
         }
 
         // Fist: no fingers extended
@@ -989,11 +1036,42 @@ object HandKeywordExtractor {
             keywords += "peace_sign"
         }
 
+        // Pinky up: only pinky extended, others curled
+        if (pinkyExt && !indexExt && !middleExt && !ringExt) {
+            keywords += "pinky_up"
+        }
+
         // OK sign: thumb tip close to index tip, other fingers extended
         val thumbIndexDist = distance(x(THUMB_TIP), y(THUMB_TIP), x(INDEX_TIP), y(INDEX_TIP))
         val handSize = distance(x(WRIST), y(WRIST), x(MIDDLE_MCP), y(MIDDLE_MCP))
         if (thumbIndexDist < handSize * 0.35f && middleExt && ringExt && pinkyExt) {
             keywords += "ok_sign"
+        }
+
+        // Double gun: both hands in pointing-up gesture
+        if (hands.size >= 2) {
+            var gunCount = 0
+            for (h in hands) {
+                if (h.size < 21) continue
+                fun hx(i: Int) = h[i].x()
+                fun hy(i: Int) = h[i].y()
+                fun hDist(a: Int, b: Int) = distance(hx(a), hy(a), hx(b), hy(b))
+                fun hWristDist(i: Int) = distance(hx(i), hy(i), hx(WRIST), hy(WRIST))
+
+                val hIndexExt  = hWristDist(INDEX_TIP)  > hWristDist(INDEX_PIP)  && hWristDist(INDEX_PIP)  > hWristDist(INDEX_MCP)  * 0.85f
+                val hMiddleExt = hWristDist(MIDDLE_TIP) > hWristDist(MIDDLE_PIP) && hWristDist(MIDDLE_PIP) > hWristDist(MIDDLE_MCP) * 0.85f
+                val hRingExt   = hWristDist(RING_TIP)   > hWristDist(RING_PIP)   && hWristDist(RING_PIP)   > hWristDist(RING_MCP)   * 0.85f
+                val hPinkyExt  = hWristDist(PINKY_TIP)  > hWristDist(PINKY_PIP)  && hWristDist(PINKY_PIP)  > hWristDist(PINKY_MCP)  * 0.85f
+                val hThumbExt  = hDist(THUMB_TIP, INDEX_MCP) > hDist(THUMB_MCP, INDEX_MCP) * 0.9f
+
+                // Gun shape: index up + thumb out, middle/ring/pinky curled
+                val isGun = hIndexExt && hThumbExt && !hMiddleExt && !hRingExt && !hPinkyExt
+                // Pointing upward: index tip above index MCP
+                val isPointingUp = hy(INDEX_TIP) < hy(INDEX_MCP)
+
+                if (isGun && isPointingUp) gunCount++
+            }
+            if (gunCount >= 2) keywords += "double_gun"
         }
 
         return keywords.distinct()
