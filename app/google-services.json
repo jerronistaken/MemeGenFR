@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "667791867238",
+    "project_id": "whatsthatmeme",
+    "storage_bucket": "whatsthatmeme.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:667791867238:android:b6124a6c7d7afd0fc45ca7",
+        "android_client_info": {
+          "package_name": "com.example.facialrecog"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDM780mBI0JL0hn42MQzf3q--0-_trsgE0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
