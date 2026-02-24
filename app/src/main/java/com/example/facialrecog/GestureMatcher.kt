@@ -2,8 +2,16 @@ package com.example.facialrecog
 
 import kotlin.math.sqrt
 
+// ══════════════════════════════════════════════════════════════════════
+//  GESTURE MATCHER
+// ══════════════════════════════════════════════════════════════════════
+
 object GestureMatcher {
 
+    /**
+     * Returns the best-matching stored gesture and its similarity score,
+     * or null if nothing exceeds [threshold].
+     */
     fun findBestMatch(
         live: GestureFeatureVector,
         threshold: Float = 0.80f
@@ -19,11 +27,11 @@ object GestureMatcher {
 
     private fun cosineSimilarity(a: FloatArray, b: FloatArray): Float {
         val len = minOf(a.size, b.size)
-        var dot = 0f
+        var dot  = 0f
         var magA = 0f
         var magB = 0f
         for (i in 0 until len) {
-            dot += a[i] * b[i]
+            dot  += a[i] * b[i]
             magA += a[i] * a[i]
             magB += b[i] * b[i]
         }

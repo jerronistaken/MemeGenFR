@@ -1,6 +1,5 @@
 package com.example.facialrecog
 
-import android.content.Context
 import android.graphics.Bitmap
 import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.framework.image.MPImage
@@ -13,17 +12,27 @@ import com.google.mlkit.vision.face.FaceDetectorOptions
 import com.google.mlkit.vision.pose.Pose
 import com.google.mlkit.vision.pose.PoseDetection
 import com.google.mlkit.vision.pose.defaults.PoseDetectorOptions
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
+
+
+// ══════════════════════════════════════════════════════════════════════
+//  STATIC IMAGE FEATURE EXTRACTOR  (for uploaded photos)
+// ══════════════════════════════════════════════════════════════════════
 
 object StaticImageExtractor {
+
+    /**
+     * Runs face + hand detection on a static bitmap and returns a feature vector.
+     * Call from a background coroutine.
+     */
     fun extract(
-        context: Context,
+        context: android.content.Context,
         bitmap: Bitmap,
         handLandmarker: HandLandmarker?,
         imageUri: String,
         label: String
     ): GestureFeatureVector {
+
+        // ── Hands ──────────────────────────────────────────────────────
         val handResult: HandLandmarkerResult? = try {
             if (handLandmarker != null) {
                 val mpImage: MPImage = BitmapImageBuilder(bitmap).build()
@@ -31,8 +40,8 @@ object StaticImageExtractor {
             } else null
         } catch (_: Exception) { null }
 
+        // ── Face (blocking via Tasks API) ─────────────────────────────
         val inputImage = InputImage.fromBitmap(bitmap, 0)
-
         val faceOptions = FaceDetectorOptions.Builder()
             .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
             .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
@@ -41,32 +50,32 @@ object StaticImageExtractor {
         val faceDetector = FaceDetection.getClient(faceOptions)
 
         var faces: List<Face> = emptyList()
-        val faceLatch = CountDownLatch(1)
+        val latch = java.util.concurrent.CountDownLatch(1)
         faceDetector.process(inputImage)
-            .addOnSuccessListener { result -> faces = result; faceLatch.countDown() }
-            .addOnFailureListener { faceLatch.countDown() }
-        faceLatch.await(3, TimeUnit.SECONDS)
+            .addOnSuccessListener { result -> faces = result; latch.countDown() }
+            .addOnFailureListener { latch.countDown() }
+        latch.await(3, java.util.concurrent.TimeUnit.SECONDS)
         faceDetector.close()
 
+        // ── Pose ──────────────────────────────────────────────────────
         val poseOptions = PoseDetectorOptions.Builder()
             .setDetectorMode(PoseDetectorOptions.SINGLE_IMAGE_MODE)
             .build()
         val poseDetector = PoseDetection.getClient(poseOptions)
-
         var pose: Pose? = null
-        val poseLatch = CountDownLatch(1)
+        val poseLatch = java.util.concurrent.CountDownLatch(1)
         poseDetector.process(inputImage)
             .addOnSuccessListener { result -> pose = result; poseLatch.countDown() }
             .addOnFailureListener { poseLatch.countDown() }
-        poseLatch.await(3, TimeUnit.SECONDS)
+        poseLatch.await(3, java.util.concurrent.TimeUnit.SECONDS)
         poseDetector.close()
 
-        val vec = LiveFeatureBuilder.build(
-            faces = faces,
-            pose = pose,
+        val liveVec = LiveFeatureBuilder.build(
+            faces     = faces,
+            pose      = pose,
             handResult = handResult
         )
 
-        return vec.copy(imageUri = imageUri, label = label)
+        return liveVec.copy(imageUri = imageUri, label = label)
     }
 }
