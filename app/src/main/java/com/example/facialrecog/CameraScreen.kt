@@ -22,6 +22,7 @@ import com.google.mediapipe.framework.image.MPImage
 import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker
+import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetectorOptions
@@ -30,43 +31,42 @@ import com.google.mlkit.vision.pose.defaults.PoseDetectorOptions
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.Executors
 
-/**
- * CameraScreen sets up the CameraX preview and image analysis pipeline.
- * On each frame it runs hand, pose, and face detection, then merges
- * the results into a list of semantic keyword strings via [onKeywords].
- *
- * Owner: Person A
- */
 @OptIn(ExperimentalGetImage::class)
 @Composable
 fun CameraScreen(
     modifier: Modifier = Modifier,
     showDebug: Boolean,
-    onKeywords: (List<String>, String) -> Unit
+    onKeywords: (List<String>, String) -> Unit,
+    onLiveVector: (GestureFeatureVector) -> Unit,
+    onHandLandmarker: (HandLandmarker?) -> Unit
 ) {
     val lifecycleOwner = LocalLifecycleOwner.current
     val context = LocalContext.current
 
     val onKeywordsState by rememberUpdatedState(onKeywords)
+    val onLiveVectorState by rememberUpdatedState(onLiveVector)
+    val onHandLandmarkerState by rememberUpdatedState(onHandLandmarker)
     val showDebugState by rememberUpdatedState(showDebug)
 
     val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
 
     val poseDetector = remember {
-        val options = PoseDetectorOptions.Builder()
-            .setDetectorMode(PoseDetectorOptions.STREAM_MODE)
-            .build()
-        PoseDetection.getClient(options)
+        PoseDetection.getClient(
+            PoseDetectorOptions.Builder()
+                .setDetectorMode(PoseDetectorOptions.STREAM_MODE)
+                .build()
+        )
     }
 
     val faceDetector = remember {
-        val options = FaceDetectorOptions.Builder()
-            .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
-            .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
-            .setContourMode(FaceDetectorOptions.CONTOUR_MODE_ALL)
-            .enableTracking()
-            .build()
-        FaceDetection.getClient(options)
+        FaceDetection.getClient(
+            FaceDetectorOptions.Builder()
+                .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
+                .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
+                .setContourMode(FaceDetectorOptions.CONTOUR_MODE_ALL)
+                .enableTracking()
+                .build()
+        )
     }
 
     val handLandmarker = remember {
@@ -86,7 +86,10 @@ fun CameraScreen(
         }
     }
 
-    val previewViewRef = remember { mutableStateOf<PreviewView?>(null) }
+    LaunchedEffect(handLandmarker) {
+        onHandLandmarkerState(handLandmarker)
+    }
+
     val debugViewRef = remember { mutableStateOf<DebugLandmarkView?>(null) }
     val cameraProviderRef = remember { mutableStateOf<ProcessCameraProvider?>(null) }
 
@@ -99,7 +102,6 @@ fun CameraScreen(
                 scaleType = PreviewView.ScaleType.FILL_CENTER
                 implementationMode = PreviewView.ImplementationMode.COMPATIBLE
             }
-            previewViewRef.value = previewView
 
             val debugView = DebugLandmarkView(ctx).apply {
                 visibility = if (showDebug) View.VISIBLE else View.GONE
@@ -147,7 +149,7 @@ fun CameraScreen(
                     val rotation = imageProxy.imageInfo.rotationDegrees
                     val inputImage = InputImage.fromMediaImage(mediaImage, rotation)
 
-                    val handResultForGesture = try {
+                    val handResultForGesture: HandLandmarkerResult? = try {
                         if (handLandmarker != null) {
                             val bmp = imageProxyToUprightBitmap(
                                 imageProxy = imageProxy,
@@ -155,9 +157,9 @@ fun CameraScreen(
                                 mirrorX = isFrontCamera
                             )
                             val mpImage: MPImage = BitmapImageBuilder(bmp).build()
-                            val r = handLandmarker.detect(mpImage)
+                            val result = handLandmarker.detect(mpImage)
                             bmp.recycle()
-                            r
+                            result
                         } else null
                     } catch (_: Exception) {
                         null
@@ -184,10 +186,21 @@ fun CameraScreen(
                                         append("pose=${pose.allPoseLandmarks.size}, faces=${faces.size}")
                                         if (handLandmarker == null) append(", hands=MODEL_MISSING")
                                         else append(", hands=${handResultForGesture?.handedness()?.size ?: 0}")
-                                        if (handKeywords.isNotEmpty()) append(", handKW=${handKeywords.joinToString("|")}")
+                                        if (handKeywords.isNotEmpty()) {
+                                            append(", handKW=${handKeywords.joinToString("|")}")
+                                        }
                                     }
 
                                     onKeywordsState(merged, dbg)
+
+                                    if (FaceBaseline.isCalibrated) {
+                                        val vec = LiveFeatureBuilder.build(
+                                            faces = faces,
+                                            pose = pose,
+                                            handResult = handResultForGesture
+                                        )
+                                        onLiveVectorState(vec)
+                                    }
 
                                     if (showDebugState) {
                                         debugView.post {
@@ -209,9 +222,7 @@ fun CameraScreen(
                                         .ifEmpty { listOf("pose_and_hand_only") }
                                     onKeywordsState(merged, "Face failed: ${it.javaClass.simpleName}")
                                 }
-                                .addOnCompleteListener {
-                                    imageProxy.close()
-                                }
+                                .addOnCompleteListener { imageProxy.close() }
                         }
                         .addOnFailureListener {
                             val merged = handKeywords.ifEmpty { listOf("pose_failed") }
@@ -222,12 +233,7 @@ fun CameraScreen(
 
                 try {
                     cameraProvider.unbindAll()
-                    cameraProvider.bindToLifecycle(
-                        lifecycleOwner,
-                        cameraSelector,
-                        preview,
-                        analysis
-                    )
+                    cameraProvider.bindToLifecycle(lifecycleOwner, cameraSelector, preview, analysis)
                 } catch (e: Exception) {
                     onKeywordsState(listOf("camera_bind_failed"), "Camera bind failed: ${e.message}")
                 }
@@ -235,7 +241,7 @@ fun CameraScreen(
 
             container
         },
-        update = { _ ->
+        update = {
             debugViewRef.value?.visibility = if (showDebug) View.VISIBLE else View.GONE
         }
     )
@@ -248,8 +254,7 @@ fun CameraScreen(
     }
 }
 
-// ─── Image conversion helpers ────────────────────────────────────────────────
-
+// Helpers
 @OptIn(ExperimentalGetImage::class)
 fun imageProxyToUprightBitmap(
     imageProxy: ImageProxy,
@@ -258,7 +263,6 @@ fun imageProxyToUprightBitmap(
 ): Bitmap {
     val nv21 = yuv420888ToNv21(imageProxy)
     val yuvImage = YuvImage(nv21, ImageFormat.NV21, imageProxy.width, imageProxy.height, null)
-
     val out = ByteArrayOutputStream()
     yuvImage.compressToJpeg(Rect(0, 0, imageProxy.width, imageProxy.height), 90, out)
     val jpegBytes = out.toByteArray()
@@ -291,33 +295,22 @@ private fun yuv420888ToNv21(image: ImageProxy): ByteArray {
 
     yBuffer.rewind(); uBuffer.rewind(); vBuffer.rewind()
 
-    val ySize = width * height
-    val uvSize = width * height / 2
-    val out = ByteArray(ySize + uvSize)
-
+    val out = ByteArray(width * height + width * height / 2)
     var outIndex = 0
-    val yRowStride = yPlane.rowStride
-    val yPixelStride = yPlane.pixelStride
+
     for (row in 0 until height) {
-        val rowStart = row * yRowStride
+        val rowStart = row * yPlane.rowStride
         for (col in 0 until width) {
-            out[outIndex++] = yBuffer.get(rowStart + col * yPixelStride)
+            out[outIndex++] = yBuffer.get(rowStart + col * yPlane.pixelStride)
         }
     }
 
-    val chromaWidth = width / 2
-    val chromaHeight = height / 2
-    val uRowStride = uPlane.rowStride
-    val vRowStride = vPlane.rowStride
-    val uPixelStride = uPlane.pixelStride
-    val vPixelStride = vPlane.pixelStride
-
-    for (row in 0 until chromaHeight) {
-        val uRowStart = row * uRowStride
-        val vRowStart = row * vRowStride
-        for (col in 0 until chromaWidth) {
-            out[outIndex++] = vBuffer.get(vRowStart + col * vPixelStride)
-            out[outIndex++] = uBuffer.get(uRowStart + col * uPixelStride)
+    for (row in 0 until height / 2) {
+        val uRow = row * uPlane.rowStride
+        val vRow = row * vPlane.rowStride
+        for (col in 0 until width / 2) {
+            out[outIndex++] = vBuffer.get(vRow + col * vPlane.pixelStride)
+            out[outIndex++] = uBuffer.get(uRow + col * uPlane.pixelStride)
         }
     }
 

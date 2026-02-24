@@ -1,6 +1,5 @@
 package com.example.facialrecog
 
-import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -19,8 +18,6 @@ import androidx.compose.ui.unit.dp
 /**
  * Displays the meme/sticker overlay image that corresponds to the active keywords,
  * or a short text summary if no overlay is mapped to the current gesture.
- *
- * Owner: Person D
  */
 @Composable
 fun OverlayResultSection(keywords: List<String>) {
@@ -28,13 +25,7 @@ fun OverlayResultSection(keywords: List<String>) {
 
     val resolvedRes = remember(keywords) { OverlayAssetResolver.resolve(keywords) }
     val overlayBitmap = remember(resolvedRes) {
-        resolvedRes?.let {
-            try {
-                BitmapFactory.decodeResource(context.resources, it)
-            } catch (_: Exception) {
-                null
-            }
-        }
+        resolvedRes?.let { OverlayAssetResolver.loadBitmap(context, it) }
     }
 
     Column(
