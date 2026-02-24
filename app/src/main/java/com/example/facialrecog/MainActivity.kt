@@ -52,6 +52,15 @@ import java.util.concurrent.Executors
 import kotlin.math.abs
 import kotlin.math.sqrt
 import androidx.compose.ui.graphics.asImageBitmap
+import android.content.ContentValues
+import android.graphics.Bitmap
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
+import android.widget.Toast
+import androidx.compose.material3.Button
+import androidx.compose.runtime.saveable.rememberSaveable
+import java.io.File
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -71,20 +80,38 @@ class MainActivity : ComponentActivity() {
 // Add this object anywhere in MainActivity.kt
 object OverlayAssetResolver {
 
-    private val KEYWORD_TO_DRAWABLE = mapOf(
-        "smiling"    to R.drawable.overlay_crown,
-        "peace_sign" to R.drawable.peace,
-        "hands_up"   to R.drawable.absolutecinema,
-        "pinky_up"   to R.drawable.pinky,
-        "four_fingers"       to R.drawable.four,
-        "double_gun" to R.drawable.crashout1,
+    // Single keyword → drawable
+    private val SINGLE_KEYWORD_TO_DRAWABLE = mapOf(
+        "point_right"   to R.drawable.ooo,
+        "peace_sign"    to R.drawable.peace,
+        "both_hands_up" to R.drawable.absolutecinema,
+        "pinky_up"      to R.drawable.pinky,
+        "four_fingers"  to R.drawable.four,
+        "double_gun"    to R.drawable.crashout1,
+        "point_up"      to R.drawable.shush,
+        "fist" to R.drawable.fist
+    )
+
+    // Multiple keywords that must ALL be present → drawable
+    // Order matters — checked top to bottom, first match wins
+    private val COMPOUND_CONDITIONS: List<Pair<Set<String>, Int>> = listOf(
+        setOf("left_hand_raised", "looking_left")  to R.drawable.giveup,
+
     )
 
     fun resolve(keywords: List<String>): Int? {
         val keywordSet = keywords.toHashSet()
-        for ((keyword, drawable) in KEYWORD_TO_DRAWABLE) {
+
+        // Check compound conditions first (more specific)
+        for ((requiredSet, drawable) in COMPOUND_CONDITIONS) {
+            if (keywordSet.containsAll(requiredSet)) return drawable
+        }
+
+        // Fall back to single keyword match
+        for ((keyword, drawable) in SINGLE_KEYWORD_TO_DRAWABLE) {
             if (keyword in keywordSet) return drawable
         }
+
         return null
     }
 
@@ -93,6 +120,7 @@ object OverlayAssetResolver {
             BitmapFactory.decodeResource(context.resources, drawableRes)
         } catch (_: Exception) { null }
 }
+
 @Composable
 fun PoseExpressionApp() {
     val context = LocalContext.current
@@ -188,13 +216,42 @@ fun PoseExpressionApp() {
         }
 
         if (overlayBitmap != null) {
-            androidx.compose.foundation.Image(
-                bitmap = overlayBitmap.asImageBitmap(),
-                contentDescription = "Pose overlay",
-                modifier = Modifier
-                    .size(160.dp)
-                    .align(Alignment.CenterHorizontally)
-            )
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                androidx.compose.foundation.Image(
+                    bitmap = overlayBitmap.asImageBitmap(),
+                    contentDescription = "Pose overlay",
+                    modifier = Modifier.size(160.dp)
+                )
+
+                Spacer(Modifier.height(8.dp))
+
+                // Download button — only shown when an overlay is active
+                var saveSuccess by remember { mutableStateOf<Boolean?>(null) }
+
+                Button(onClick = {
+                    val saved = saveImageToGallery(context, overlayBitmap)
+                    saveSuccess = saved
+                    Toast.makeText(
+                        context,
+                        if (saved) "Saved to Pictures/MemeGenFR!" else "Save failed",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }) {
+                    Text("⬇ Save Image")
+                }
+
+                saveSuccess?.let { success ->
+                    Text(
+                        text = if (success) "✓ Saved!" else "✗ Failed to save",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (success) androidx.compose.ui.graphics.Color.Green
+                        else androidx.compose.ui.graphics.Color.Red
+                    )
+                }
+            }
         } else {
             Text(
                 text = "Active: ${keywords.filter { it != "hand_detected" && it != "neutral" }.joinToString(", ").ifEmpty { "none" }}",
@@ -880,57 +937,100 @@ object FaceKeywordExtractor {
             val eyeWidth  = leftEyePts.maxOf { it.x } - leftEyePts.minOf { it.x }
             if (eyeWidth > 0) eyeHeight / eyeWidth else null
         } else null
+// --- Debug: print all raw facial geometry values ---
+        android.util.Log.d("FaceValues", buildString {
+            appendLine("=== FACE FRAME ===")
+            appendLine("smile=%.3f".format(smile))
+            appendLine("leftEye=%.3f  rightEye=%.3f".format(leftEye, rightEye))
+            //appendLine("yaw=%.1f  pitch=%.1f  roll=%.1f".format(yaw, pitch, roll))
+            appendLine("mouthOpen=${mouthOpen?.let { "%.2f".format(it) } ?: "null"}")
+            appendLine("mouthCurve=${mouthCurve?.let { "%.2f".format(it) } ?: "null"}")
+            appendLine("browRaise=${browRaise?.let { "%.4f".format(it) } ?: "null"}")
+            appendLine("browFurrow=${browFurrow?.let { "%.2f".format(it) } ?: "null"}")
+            appendLine("eyeOpenRatio=${eyeOpenRatio?.let { "%.4f".format(it) } ?: "null"}")
 
-        // --- Classify emotions ---
+            // Raw brow point positions
+            leftBrow?.let { pts ->
+                appendLine("leftBrow points (${pts.size}):")
+                pts.forEachIndexed { i, p -> append("  [$i](%.1f,%.1f)".format(p.x, p.y)) }
+                appendLine()
+                appendLine("  innerY=%.2f  outerY=%.2f".format(
+                    pts.maxByOrNull { it.x }?.y ?: 0f,
+                    pts.minByOrNull { it.x }?.y ?: 0f
+                ))
+            } ?: appendLine("leftBrow=null")
 
-        // SURPRISED: mouth open + eyebrows raised + eyes wide
-        val isSurprised = (mouthOpen != null && mouthOpen > 15f) &&
-                (browRaise != null && browRaise < 0.25f)
-        if (isSurprised) {
-            keywords += "surprised"
-        }
+            rightBrow?.let { pts ->
+                appendLine("rightBrow points (${pts.size}):")
+                pts.forEachIndexed { i, p -> append("  [$i](%.1f,%.1f)".format(p.x, p.y)) }
+                appendLine()
+                appendLine("  innerY=%.2f  outerY=%.2f".format(
+                    pts.minByOrNull { it.x }?.y ?: 0f,
+                    pts.maxByOrNull { it.x }?.y ?: 0f
+                ))
+            } ?: appendLine("rightBrow=null")
 
-        // HAPPY / SMILING: ML Kit smile score OR mouth curve upward
-        val isSmiling = smile > 0.65f || (mouthCurve != null && mouthCurve < -8f && smile > 0.3f)
-        if (isSmiling && !isSurprised) {
-            keywords += "smiling"
-        }
+            // Raw mouth positions
+            upperLip?.let { pts ->
+                val centerY = pts[pts.size / 2].y
+                appendLine("upperLip centerY=%.2f".format(centerY))
+            } ?: appendLine("upperLip=null")
 
-        // SAD: mouth corners down + brows may be slightly raised inner
-        val isSad = (mouthCurve != null && mouthCurve > 10f) &&
-                smile < 0.3f
-        if (isSad) {
-            keywords += "sad"
-        }
+            mouthPoints?.let { pts ->
+                val centerY = pts[pts.size / 2].y
+                val leftY = pts.first().y
+                val rightY = pts.last().y
+                appendLine("lowerLip centerY=%.2f  leftCornerY=%.2f  rightCornerY=%.2f".format(centerY, leftY, rightY))
+            } ?: appendLine("lowerLip=null")
 
-        // ANGRY: furrowed brows + low smile + eyes not wide
-        val isAngry = (browFurrow != null && browFurrow > 8f) &&
-                smile < 0.2f &&
-                (browRaise == null || browRaise > 0.28f)
-        if (isAngry) {
-            keywords += "angry"
-        }
+            // Face bounding box for scale reference
+            faceContour?.let { pts ->
+                val topY   = pts.minOf { it.y }
+                val bottomY = pts.maxOf { it.y }
+                appendLine("faceHeight=%.2f  topY=%.2f  bottomY=%.2f".format(bottomY - topY, topY, bottomY))
+            } ?: appendLine("faceContour=null")
+        })
 
-        // DISGUSTED: similar to angry but with mouth open slightly + nose wrinkle
-        // (ML Kit doesn't give nose wrinkle, approximate with furrowed brow + slight mouth open)
-        val isDisgusted = (browFurrow != null && browFurrow > 5f) &&
-                (mouthOpen != null && mouthOpen in 3f..15f) &&
-                smile < 0.2f
-        if (isDisgusted && !isAngry) {
-            keywords += "disgusted"
-        }
+        val bothEyesClosed = leftEye < 0.2f && rightEye < 0.2f
+        val eyesWideOpen   = leftEye > 0.9f && rightEye > 0.9f
 
-        // FEARFUL: eyes wide + brows raised + mouth slightly open
-        val isFearful =
-                (browRaise != null && browRaise < 0.22f) &&
-                (mouthOpen != null && mouthOpen > 5f) &&
-                smile < 0.3f &&
+// browFurrow is always negative for this face — less negative = more furrowed
+// browRaise is always ~0.15-0.19 — not reliable for surprise alone
+// eyesWideOpen is always true — not useful
+
+// SHOCKED/SURPRISED: only reliable signal is mouthOpen >> 50
+        val isSurprised = (mouthOpen != null && mouthOpen > 50f) &&
+                smile < 0.05f
+        if (isSurprised) keywords += "surprised"
+
+// SMILING: ML Kit smile score only
+        val isSmiling = smile > 0.7f
+        if (isSmiling && !isSurprised) keywords += "smiling"
+
+// ANGRY: browFurrow closer to 0 (less negative) + low smile + mouth not wide open
+// Angry=-7, Neutral=-11, so angry is LESS negative
+        val isAngry = (browFurrow != null && browFurrow > -9f) &&
+                smile < 0.05f &&
+                (mouthOpen != null && mouthOpen < 35f) &&
                 !isSurprised
-        if (isFearful) {
-            keywords += "fearful"
-        }
+        if (isAngry) keywords += "angry"
 
-        // NEUTRAL: nothing else triggered
+// SAD: browFurrow most negative (< -12) + low smile
+// Sad=-14, most negative of all emotions
+        val isSad = (browFurrow != null && browFurrow < -12f) &&
+                smile < 0.05f &&
+                !isSurprised
+        if (isSad) keywords += "sad"
+
+// DISGUSTED: slightly higher smile than other negatives + small mouthOpen
+// Disgusted had smile=0.022 vs others ~0.004-0.009
+        val isDisgusted = (smile > 0.015f && smile < 0.1f) &&
+                (mouthOpen != null && mouthOpen < 30f) &&
+                !isSurprised &&
+                !isSmiling
+        if (isDisgusted) keywords += "disgusted"
+
+// NEUTRAL: fallback
         if (keywords.none { it in listOf("smiling","sad","angry","surprised","disgusted","fearful") }) {
             keywords += "neutral"
         }
@@ -993,7 +1093,24 @@ object HandKeywordExtractor {
 
         val extendedCount = listOf(indexExt, middleExt, ringExt, pinkyExt).count { it }
 
-        // Open palm: all 4 fingers extended
+// Both hands open palm raised
+        if (hands.size >= 2) {
+            val bothOpen = hands.count { h ->
+                if (h.size < 21) return@count false
+                fun hWristDist(i: Int) = distance(h[i].x(), h[i].y(), h[WRIST].x(), h[WRIST].y())
+                val allFour = listOf(INDEX_TIP, MIDDLE_TIP, RING_TIP, PINKY_TIP)
+                    .zip(listOf(INDEX_PIP, MIDDLE_PIP, RING_PIP, PINKY_PIP))
+                    .zip(listOf(INDEX_MCP, MIDDLE_MCP, RING_MCP, PINKY_MCP))
+                    .all { (tipPip, mcp) ->
+                        hWristDist(tipPip.first) > hWristDist(tipPip.second) &&
+                                hWristDist(tipPip.second) > hWristDist(mcp) * 0.85f
+                    }
+                allFour
+            }
+            if (bothOpen >= 2) keywords += "both_hands_up"
+        }
+
+// Single open palm (one hand)
         if (extendedCount == 4) {
             keywords += "four_fingers"
         }
@@ -1167,4 +1284,38 @@ fun View.toBitmap(): Bitmap {
     val canvas = Canvas(bitmap)
     draw(canvas)
     return bitmap
+}
+
+fun saveImageToGallery(context: android.content.Context, bitmap: Bitmap, filename: String = "MemeGenFR_${System.currentTimeMillis()}"): Boolean {
+    return try {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val contentValues = ContentValues().apply {
+                put(MediaStore.Images.Media.DISPLAY_NAME, "$filename.png")
+                put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+                put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/MemeGenFR")
+                put(MediaStore.Images.Media.IS_PENDING, 1)
+            }
+            val uri = context.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
+            uri?.let {
+                context.contentResolver.openOutputStream(it)?.use { stream ->
+                    bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)
+                }
+                contentValues.clear()
+                contentValues.put(MediaStore.Images.Media.IS_PENDING, 0)
+                context.contentResolver.update(it, contentValues, null, null)
+            }
+            true
+        } else {
+            val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "MemeGenFR")
+            dir.mkdirs()
+            val file = File(dir, "$filename.png")
+            file.outputStream().use { stream ->
+                bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)
+            }
+            true
+        }
+    } catch (e: Exception) {
+        android.util.Log.e("MemeGen", "Failed to save image", e)
+        false
+    }
 }
