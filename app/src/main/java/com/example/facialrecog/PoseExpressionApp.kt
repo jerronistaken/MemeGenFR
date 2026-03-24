@@ -71,7 +71,6 @@ import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.net.URL
 
 @Composable
 fun PoseExpressionApp() {
@@ -198,7 +197,7 @@ fun PoseExpressionApp() {
 
     var matchedBitmap by remember { mutableStateOf<Bitmap?>(null) }
     LaunchedEffect(matchedGesture?.imageUri) {
-        matchedBitmap = matchedGesture?.imageUri?.let { loadBitmapFromAnySource(context, it) }
+        matchedBitmap = matchedGesture?.imageUri?.let { LocalImageStore.loadBitmap(context, it) }
     }
 
     val fallbackRes = remember(keywords) { OverlayAssetResolver.resolve(keywords) }
@@ -303,12 +302,19 @@ fun PoseExpressionApp() {
 
                         isExtracting = true
                         scope.launch {
+                            val localImagePath = withContext(Dispatchers.IO) {
+                                LocalImageStore.saveBitmapToInternalStorage(
+                                    context = context,
+                                    bitmap = bmp
+                                )
+                            }
+
                             val vector = withContext(Dispatchers.IO) {
                                 StaticImageExtractor.extract(
                                     context = context,
                                     bitmap = bmp,
                                     handLandmarker = handLandmarkerRef,
-                                    imageUri = uri.toString(),
+                                    imageUri = localImagePath,
                                     label = labelInput.trim()
                                 )
                             }
@@ -319,7 +325,7 @@ fun PoseExpressionApp() {
 
                             val uploadResult = cloudRepository.uploadMeme(
                                 localImageUri = uri.toString(),
-                                vector = vector,
+                                vector = vector.copy(imageUri = uri.toString()),
                                 isPublic = true
                             )
 
@@ -392,12 +398,7 @@ fun PoseExpressionApp() {
                                 horizontalAlignment = Alignment.CenterHorizontally
                             ) {
                                 val bmp = remember(gesture.imageUri) {
-                                    try {
-                                        context.contentResolver.openInputStream(Uri.parse(gesture.imageUri))
-                                            ?.use { BitmapFactory.decodeStream(it) }
-                                    } catch (_: Exception) {
-                                        null
-                                    }
+                                    LocalImageStore.loadBitmap(context, gesture.imageUri)
                                 }
 
                                 if (bmp != null) {
@@ -494,7 +495,8 @@ fun PoseExpressionApp() {
                     onClick = {
                         authError = null
                         authBusy = false
-                        authRepository.signOut()}
+                        authRepository.signOut()
+                    }
                 ) {
                     Text("Logout")
                 }
@@ -523,12 +525,7 @@ fun PoseExpressionApp() {
 
                 Spacer(modifier = Modifier.weight(1f))
 
-                val communityText = if (communitySyncing) {
-                    "Syncing..."
-                } else {
-                    "Cloud ${communityGestures.size}"
-                }
-
+                val communityText = if (communitySyncing) "Syncing..." else "Cloud ${communityGestures.size}"
                 Text(
                     text = communityText,
                     style = MaterialTheme.typography.labelMedium,
@@ -603,7 +600,8 @@ fun PoseExpressionApp() {
                         )
 
                         val sourceLabel = when {
-                            matchedBitmap != null -> "📸 Learned/cloud match"
+                            matchedGesture?.imageUri?.startsWith("http") == true -> "☁ Cloud match"
+                            matchedBitmap != null -> "📸 Learned local match"
                             fallbackBitmap != null -> "🔑 Keyword match"
                             else -> ""
                         }
@@ -711,9 +709,7 @@ private fun AuthGate(
                 style = MaterialTheme.typography.headlineMedium,
                 fontWeight = FontWeight.Bold
             )
-
             Spacer(modifier = Modifier.height(8.dp))
-
             Text(
                 text = if (isRegisterMode) "Create account" else "Sign in",
                 style = MaterialTheme.typography.titleMedium
@@ -753,11 +749,8 @@ private fun AuthGate(
 
             Button(
                 onClick = {
-                    if (isRegisterMode) {
-                        onRegister(email, password)
-                    } else {
-                        onLogin(email, password)
-                    }
+                    if (isRegisterMode) onRegister(email, password)
+                    else onLogin(email, password)
                 },
                 enabled = !isLoading && email.isNotBlank() && password.length >= 6,
                 modifier = Modifier.fillMaxWidth()
@@ -785,24 +778,5 @@ private fun AuthGate(
                 )
             }
         }
-    }
-}
-
-private suspend fun loadBitmapFromAnySource(
-    context: android.content.Context,
-    source: String
-): Bitmap? = withContext(Dispatchers.IO) {
-    try {
-        when {
-            source.startsWith("http://") || source.startsWith("https://") -> {
-                URL(source).openStream().use { BitmapFactory.decodeStream(it) }
-            }
-            else -> {
-                context.contentResolver.openInputStream(Uri.parse(source))
-                    ?.use { BitmapFactory.decodeStream(it) }
-            }
-        }
-    } catch (_: Exception) {
-        null
     }
 }
