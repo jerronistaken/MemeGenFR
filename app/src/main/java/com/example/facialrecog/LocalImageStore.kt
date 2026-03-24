@@ -25,6 +25,14 @@ object LocalImageStore {
         return file.absolutePath
     }
 
+    /**
+     * Load a bitmap from any source (local file, content URI, or http/https URL).
+     *
+     * ⚠ MUST be called from a background thread / IO dispatcher.
+     * For remote URLs this performs a blocking network call. For local paths it
+     * performs a blocking disk read. Never call this on the main thread or
+     * inside a remember{} block.
+     */
     fun loadBitmap(context: Context, source: String): Bitmap? {
         return try {
             when {
@@ -43,6 +51,26 @@ object LocalImageStore {
                     File(source).inputStream().use { BitmapFactory.decodeStream(it) }
                 }
             }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Download a remote image (http/https) and persist it to internal storage.
+     * Returns the local absolute path on success, or null on failure.
+     *
+     * ⚠ MUST be called from a background thread / IO dispatcher.
+     */
+    fun downloadAndSave(
+        context: Context,
+        remoteUrl: String,
+        prefix: String = "cloud"
+    ): String? {
+        return try {
+            val bitmap = URL(remoteUrl).openStream().use { BitmapFactory.decodeStream(it) }
+                ?: return null
+            saveBitmapToInternalStorage(context, bitmap, prefix)
         } catch (_: Exception) {
             null
         }

@@ -72,6 +72,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+// ══════════════════════════════════════════════════════════════════════
+//  Helper: is this URI pointing to a remote cloud resource?
+// ══════════════════════════════════════════════════════════════════════
+private fun String.isRemoteUrl() = startsWith("http://") || startsWith("https://")
+
 @Composable
 fun PoseExpressionApp() {
     val context = LocalContext.current
@@ -173,6 +178,9 @@ fun PoseExpressionApp() {
     var lastDebug by remember { mutableStateOf("Waiting for frames...") }
     var liveVector by remember { mutableStateOf<GestureFeatureVector?>(null) }
 
+    // ── Merge local + community into one candidate pool ───────────────────────
+    // Cloud gestures whose imageUri is a remote URL are included in matching but
+    // their images are loaded asynchronously via LaunchedEffect, never on-thread.
     val allCandidates by remember(localGestures, communityGestures, localVersion) {
         derivedStateOf {
             val localKeys = localGestures.map { "${it.label}|${it.imageUri}" }.toSet()
@@ -195,9 +203,19 @@ fun PoseExpressionApp() {
         matchScore = result?.second ?: 0f
     }
 
+    // ── Async bitmap loading for the matched gesture ──────────────────────────
+    // Previously this used remember{} which calls loadBitmap on the composition
+    // thread, causing ANR for remote URLs. Now it uses LaunchedEffect + IO.
     var matchedBitmap by remember { mutableStateOf<Bitmap?>(null) }
     LaunchedEffect(matchedGesture?.imageUri) {
-        matchedBitmap = matchedGesture?.imageUri?.let { LocalImageStore.loadBitmap(context, it) }
+        val uri = matchedGesture?.imageUri
+        if (uri == null) {
+            matchedBitmap = null
+            return@LaunchedEffect
+        }
+        matchedBitmap = withContext(Dispatchers.IO) {
+            LocalImageStore.loadBitmap(context, uri)
+        }
     }
 
     val fallbackRes = remember(keywords) { OverlayAssetResolver.resolve(keywords) }
@@ -214,6 +232,53 @@ fun PoseExpressionApp() {
     val overlayBitmap = matchedBitmap ?: fallbackBitmap
     var saveSuccess by remember(overlayBitmap) { mutableStateOf<Boolean?>(null) }
 
+    // ── Cloud-claim state ─────────────────────────────────────────────────────
+    // When the user acts out a cloud meme above threshold, we show a prompt
+    // offering to save it locally. This is keyed on the matched gesture so it
+    // only fires once per new cloud match.
+    var claimCandidate by remember { mutableStateOf<GestureFeatureVector?>(null) }
+    var isClaiming by remember { mutableStateOf(false) }
+
+    // Trigger the claim prompt whenever a high-confidence cloud match appears
+    // that the user doesn't already own locally.
+
+    // True when the matched gesture's label exists in the community pool — even
+    // if the local copy won the vector match (because deduplication prefers the
+    // local entry but the gesture still originated from the cloud).
+    val hasCloudCounterpart = matchedGesture?.let { mg ->
+        communityGestures.any { it.label == mg.label }
+    } ?: false
+
+    // A "cloud match" is any match whose gesture has a cloud counterpart,
+    // regardless of whether the winning candidate's imageUri is remote or local.
+    val isCloudMatch = hasCloudCounterpart
+
+    // The user already owns it locally only if they have a non-remote URI for
+    // this label (i.e. they've previously claimed or self-taught it).
+    val alreadyOwned = matchedGesture?.let { mg ->
+        localGestures.any { it.label == mg.label && !it.imageUri.isRemoteUrl() }
+    } ?: false
+
+    // For the claim dialog we need the cloud vector (with the remote imageUri)
+    // so we can download it, not the local deduped copy.
+    val cloudCounterpart = matchedGesture?.let { mg ->
+        communityGestures.firstOrNull { it.label == mg.label }
+    }
+
+    LaunchedEffect(matchedGesture?.label, matchScore) {
+        if (isCloudMatch && !alreadyOwned && matchScore >= 0.85f) {
+            // Only surface the prompt if not already showing it for this gesture
+            if (claimCandidate?.label != matchedGesture?.label) {
+                // Prefer the cloud vector so downloadAndSave gets the remote URL
+                claimCandidate = cloudCounterpart ?: matchedGesture
+            }
+        } else if (!isCloudMatch) {
+            // Clear any pending claim if we've moved away from a cloud-originated match
+            claimCandidate = null
+        }
+    }
+
+    // ── Teach / upload state ──────────────────────────────────────────────────
     var pendingBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var pendingUri by remember { mutableStateOf<Uri?>(null) }
     var showLabelDialog by remember { mutableStateOf(false) }
@@ -253,6 +318,109 @@ fun PoseExpressionApp() {
             .ifEmpty { "none" }
     }
 
+    // ══════════════════════════════════════════════════════════════════════════
+    //  DIALOG: Claim a matched cloud meme
+    // ══════════════════════════════════════════════════════════════════════════
+    val candidate = claimCandidate
+    if (candidate != null && !isClaiming) {
+        AlertDialog(
+            onDismissRequest = { claimCandidate = null },
+            title = { Text("☁ Unlock Cloud Meme") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "You matched \"${candidate.label}\" from the community pool " +
+                                "(${(matchScore * 100).toInt()}% confidence)!"
+                    )
+                    if (matchedBitmap != null) {
+                        Image(
+                            bitmap = matchedBitmap!!.asImageBitmap(),
+                            contentDescription = null,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(160.dp)
+                                .clip(RoundedCornerShape(8.dp)),
+                            contentScale = ContentScale.Fit
+                        )
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(80.dp)
+                                .background(
+                                    MaterialTheme.colorScheme.surfaceVariant,
+                                    RoundedCornerShape(8.dp)
+                                ),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.size(32.dp))
+                        }
+                    }
+                    Text(
+                        text = "Save this meme to your local library?",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        isClaiming = true
+                        scope.launch {
+                            // 1. Download the remote image and persist it locally.
+                            val localPath = withContext(Dispatchers.IO) {
+                                LocalImageStore.downloadAndSave(
+                                    context = context,
+                                    remoteUrl = candidate.imageUri,
+                                    prefix = "cloud_${candidate.label}"
+                                )
+                            }
+
+                            if (localPath == null) {
+                                Toast.makeText(
+                                    context,
+                                    "Failed to download image — check your connection",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                                isClaiming = false
+                                claimCandidate = null
+                                return@launch
+                            }
+
+                            // 2. Re-point the feature vector at the local path and save.
+                            val localVector = candidate.copy(imageUri = localPath)
+                            withContext(Dispatchers.IO) {
+                                GestureStore.add(context, localVector)
+                            }
+                            localGestures = GestureStore.all()
+                            localVersion++
+
+                            isClaiming = false
+                            claimCandidate = null
+
+                            Toast.makeText(
+                                context,
+                                "\"${candidate.label}\" saved to your library!",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    }
+                ) {
+                    Text("Save to Library")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { claimCandidate = null }) {
+                    Text("Not now")
+                }
+            }
+        )
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  DIALOG: Teach a new gesture
+    // ══════════════════════════════════════════════════════════════════════════
     if (showLabelDialog && pendingBitmap != null) {
         AlertDialog(
             onDismissRequest = {
@@ -372,6 +540,9 @@ fun PoseExpressionApp() {
         )
     }
 
+    // ══════════════════════════════════════════════════════════════════════════
+    //  DIALOG: Local library browser
+    // ══════════════════════════════════════════════════════════════════════════
     if (showLibrary) {
         val stored by remember(localGestures, localVersion) {
             derivedStateOf { localGestures }
@@ -397,13 +568,19 @@ fun PoseExpressionApp() {
                                     .padding(6.dp),
                                 horizontalAlignment = Alignment.CenterHorizontally
                             ) {
-                                val bmp = remember(gesture.imageUri) {
-                                    LocalImageStore.loadBitmap(context, gesture.imageUri)
+                                // ── Async bitmap load per library card ────────
+                                var cardBitmap by remember(gesture.imageUri) {
+                                    mutableStateOf<Bitmap?>(null)
+                                }
+                                LaunchedEffect(gesture.imageUri) {
+                                    cardBitmap = withContext(Dispatchers.IO) {
+                                        LocalImageStore.loadBitmap(context, gesture.imageUri)
+                                    }
                                 }
 
-                                if (bmp != null) {
+                                if (cardBitmap != null) {
                                     Image(
-                                        bitmap = bmp.asImageBitmap(),
+                                        bitmap = cardBitmap!!.asImageBitmap(),
                                         contentDescription = gesture.label,
                                         modifier = Modifier
                                             .size(80.dp)
@@ -460,6 +637,9 @@ fun PoseExpressionApp() {
         )
     }
 
+    // ══════════════════════════════════════════════════════════════════════════
+    //  MAIN SCREEN
+    // ══════════════════════════════════════════════════════════════════════════
     Surface(
         modifier = Modifier
             .fillMaxSize()
@@ -577,12 +757,14 @@ fun PoseExpressionApp() {
                             text = lastDebug,
                             style = MaterialTheme.typography.bodySmall,
                             maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                            overflow = TextOverflow.Ellipsis,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
             }
 
+            // ── Matched overlay ───────────────────────────────────────────────
             Spacer(modifier = Modifier.height(8.dp))
 
             Box(
@@ -600,10 +782,11 @@ fun PoseExpressionApp() {
                         )
 
                         val sourceLabel = when {
-                            matchedGesture?.imageUri?.startsWith("http") == true -> "☁ Cloud match"
-                            matchedBitmap != null -> "📸 Learned local match"
-                            fallbackBitmap != null -> "🔑 Keyword match"
-                            else -> ""
+                            hasCloudCounterpart && !alreadyOwned -> "☁ Cloud match — act it out to unlock!"
+                            hasCloudCounterpart && alreadyOwned  -> "☁ Cloud match (owned locally)"
+                            matchedBitmap != null                -> "📸 Learned local match"
+                            fallbackBitmap != null               -> "🔑 Keyword match"
+                            else                                 -> ""
                         }
 
                         if (sourceLabel.isNotEmpty()) {
@@ -682,6 +865,9 @@ fun PoseExpressionApp() {
     }
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+//  AUTH GATE (unchanged)
+// ══════════════════════════════════════════════════════════════════════════════
 @Composable
 private fun AuthGate(
     isLoading: Boolean,
