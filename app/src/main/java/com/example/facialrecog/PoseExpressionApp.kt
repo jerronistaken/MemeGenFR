@@ -278,6 +278,21 @@ fun PoseExpressionApp() {
     // offering to save it locally. This is keyed on the matched gesture so it
     // only fires once per new cloud match.
     var claimCandidate by remember { mutableStateOf<GestureFeatureVector?>(null) }
+    var claimConfidence by remember { mutableStateOf(0f) }
+    var claimBitmap by remember { mutableStateOf<Bitmap?>(null) }
+
+    LaunchedEffect(claimCandidate?.imageUri) {
+        val uri = claimCandidate?.imageUri
+        if (uri == null) {
+            claimBitmap = null
+            return@LaunchedEffect
+        }
+
+        claimBitmap = withContext(Dispatchers.IO) {
+            LocalImageStore.loadBitmapCached(context, uri)
+        }
+    }
+
     var isClaiming by remember { mutableStateOf(false) }
 
     // Trigger the claim prompt whenever a high-confidence cloud match appears
@@ -307,15 +322,17 @@ fun PoseExpressionApp() {
     }
 
     LaunchedEffect(matchedGesture?.label, matchScore) {
-        if (isCloudMatch && !alreadyOwned && matchScore >= 0.85f) {
-            // Only surface the prompt if not already showing it for this gesture
-            if (claimCandidate?.label != matchedGesture?.label) {
-                // Prefer the cloud vector so downloadAndSave gets the remote URL
+        if (
+            isCloudMatch &&
+            !alreadyOwned &&
+            matchScore >= 0.85f
+        ) {
+
+            // If new match OR higher score → update
+            if (claimCandidate == null || matchScore > claimConfidence) {
                 claimCandidate = cloudCounterpart ?: matchedGesture
+                claimConfidence = matchScore
             }
-        } else if (!isCloudMatch) {
-            // Clear any pending claim if we've moved away from a cloud-originated match
-            claimCandidate = null
         }
     }
 
@@ -395,18 +412,19 @@ fun PoseExpressionApp() {
     val candidate = claimCandidate
     if (candidate != null && !isClaiming) {
         AlertDialog(
-            onDismissRequest = { claimCandidate = null },
+            onDismissRequest = { claimCandidate = null
+                claimBitmap = null},
             title = { Text("☁ Unlock Cloud Meme") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
                         "You matched \"${candidate.label}\" from the community pool " +
-                                "(${(matchScore * 100).toInt()}% confidence)!"
+                                "(${(claimConfidence * 100).toInt()}% confidence)"
                     )
-                    if (matchedBitmap != null) {
+                    if (claimBitmap != null) {
                         Image(
-                            bitmap = matchedBitmap!!.asImageBitmap(),
-                            contentDescription = null,
+                            bitmap = claimBitmap!!.asImageBitmap(),
+                            contentDescription = candidate.label,
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(160.dp)
@@ -417,7 +435,7 @@ fun PoseExpressionApp() {
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(80.dp)
+                                .height(160.dp)
                                 .background(
                                     MaterialTheme.colorScheme.surfaceVariant,
                                     RoundedCornerShape(8.dp)
@@ -456,6 +474,8 @@ fun PoseExpressionApp() {
                                 ).show()
                                 isClaiming = false
                                 claimCandidate = null
+                                claimBitmap = null
+                                claimConfidence = 0f
                                 return@launch
                             }
 
@@ -469,6 +489,8 @@ fun PoseExpressionApp() {
 
                             isClaiming = false
                             claimCandidate = null
+                            claimConfidence = 0f
+                            claimBitmap = null
 
                             Toast.makeText(
                                 context,
@@ -482,7 +504,9 @@ fun PoseExpressionApp() {
                 }
             },
             dismissButton = {
-                TextButton(onClick = { claimCandidate = null }) {
+                TextButton(onClick = { claimCandidate = null
+                    claimBitmap = null
+                    claimConfidence = 0f}) {
                     Text("Not now")
                 }
             }
