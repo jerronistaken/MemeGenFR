@@ -37,6 +37,9 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.blur
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -67,6 +70,7 @@ import com.example.facialrecog.auth.AuthRepository
 import com.example.facialrecog.cloud.CloudRepository
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseUser
+import com.google.firebase.firestore.DocumentSnapshot
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -125,23 +129,53 @@ fun PoseExpressionApp() {
     }
 
     var localGestures by remember { mutableStateOf<List<GestureFeatureVector>>(emptyList()) }
-    var communityGestures by remember { mutableStateOf<List<GestureFeatureVector>>(emptyList()) }
-    var communitySyncing by remember { mutableStateOf(false) }
-    var localVersion by remember { mutableIntStateOf(0) }
-
     LaunchedEffect(Unit) {
         withContext(Dispatchers.IO) { GestureStore.load(context) }
         localGestures = GestureStore.all()
     }
 
-    LaunchedEffect(currentUser?.uid) {
-        communitySyncing = true
-        val result = cloudRepository.fetchPublicGestures()
-        communityGestures = result.getOrDefault(emptyList())
-        communitySyncing = false
-        result.exceptionOrNull()?.let {
-            Toast.makeText(context, "Community sync failed: ${it.message}", Toast.LENGTH_SHORT).show()
+    var communityGestures by remember { mutableStateOf<List<GestureFeatureVector>>(emptyList()) }
+    var communitySyncing by remember { mutableStateOf(false) }
+    // Cursor for the next community page; null = first page or no more pages available.
+    var communityNextCursor by remember { mutableStateOf<DocumentSnapshot?>(null) }
+    var communityHasMore by remember { mutableStateOf(false) }
+    var localVersion by remember { mutableIntStateOf(0) }
+
+    // Loads the next page of public gestures and appends to communityGestures.
+    // Safe to call multiple times; guards against concurrent calls via communitySyncing.
+    fun loadMoreCommunityGestures() {
+        if (communitySyncing) return
+        scope.launch {
+            communitySyncing = true
+            val result = cloudRepository.fetchPublicGesturesPaged(afterCursor = communityNextCursor)
+            result.onSuccess { page ->
+                // Deduplicate by label before appending: if the community already
+                // has an entry with the same label, keep the one already in the
+                // list (newer entries win — they arrived first due to DESC order).
+                val existingLabels = communityGestures.map { it.label }.toHashSet()
+                val fresh = page.gestures.filterNot { it.label in existingLabels }
+                communityGestures = communityGestures + fresh
+                communityNextCursor = page.nextCursor
+                communityHasMore = page.nextCursor != null
+            }
+            result.exceptionOrNull()?.let {
+                android.util.Log.e("CommunitySync", "Failed to load community memes", it)
+                Toast.makeText(
+                    context,
+                    "Community sync failed: ${it.message}",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+            communitySyncing = false
         }
+    }
+
+    LaunchedEffect(currentUser?.uid) {
+        // Reset and load the first page whenever the signed-in user changes.
+        communityGestures = emptyList()
+        communityNextCursor = null
+        communityHasMore = false
+        loadMoreCommunityGestures()
     }
 
     var showDebug by remember { mutableStateOf(false) }
@@ -179,26 +213,36 @@ fun PoseExpressionApp() {
     var liveVector by remember { mutableStateOf<GestureFeatureVector?>(null) }
 
     // ── Merge local + community into one candidate pool ───────────────────────
-    // Cloud gestures whose imageUri is a remote URL are included in matching but
-    // their images are loaded asynchronously via LaunchedEffect, never on-thread.
+    // Rules:
+    //   1. Local gestures always win over community ones with the same label
+    //      (the user has already claimed/taught them — use the local copy).
+    //   2. Within the community pool, deduplicate by label keeping the first
+    //      (newest) entry so each distinct pose appears exactly once.
+    //   3. GestureMatcher.syncCache is called whenever the pool changes so
+    //      stale pre-computed weighted arrays are evicted.
     val allCandidates by remember(localGestures, communityGestures, localVersion) {
         derivedStateOf {
-            val localKeys = localGestures.map { "${it.label}|${it.imageUri}" }.toSet()
-            val dedupedCommunity = communityGestures.filterNot { "${it.label}|${it.imageUri}" in localKeys }
-            localGestures + dedupedCommunity
+            val localLabels = localGestures.map { it.label }.toHashSet()
+            val seenCommunityLabels = HashSet<String>()
+            val dedupedCommunity = communityGestures.filter { cloud ->
+                cloud.label !in localLabels && seenCommunityLabels.add(cloud.label)
+            }
+            val merged = localGestures + dedupedCommunity
+            GestureMatcher.syncCache(merged)
+            merged
         }
     }
 
     var matchedGesture by remember { mutableStateOf<GestureFeatureVector?>(null) }
     var matchScore by remember { mutableStateOf(0f) }
 
+    // Dispatch to Default so cosine similarity over 200 candidates
+    // doesn't compete with UI work on the main thread.
     LaunchedEffect(liveVector, allCandidates) {
         val vec = liveVector ?: return@LaunchedEffect
-        val result = GestureMatcher.findBestMatch(
-            live = vec,
-            threshold = 0.80f,
-            candidates = allCandidates
-        )
+        val result = withContext(Dispatchers.Default) {
+            GestureMatcher.findBestMatch(live = vec, threshold = 0.80f, candidates = allCandidates)
+        }
         matchedGesture = result?.first
         matchScore = result?.second ?: 0f
     }
@@ -209,12 +253,9 @@ fun PoseExpressionApp() {
     var matchedBitmap by remember { mutableStateOf<Bitmap?>(null) }
     LaunchedEffect(matchedGesture?.imageUri) {
         val uri = matchedGesture?.imageUri
-        if (uri == null) {
-            matchedBitmap = null
-            return@LaunchedEffect
-        }
+        if (uri == null) { matchedBitmap = null; return@LaunchedEffect }
         matchedBitmap = withContext(Dispatchers.IO) {
-            LocalImageStore.loadBitmap(context, uri)
+            LocalImageStore.loadBitmapCached(context, uri)
         }
     }
 
@@ -275,6 +316,36 @@ fun PoseExpressionApp() {
         } else if (!isCloudMatch) {
             // Clear any pending claim if we've moved away from a cloud-originated match
             claimCandidate = null
+        }
+    }
+
+    // ── Cloud-unlock progress (live confidence toward the 0.85 threshold) ───────
+    // Shows a progress bar + blurred teaser for unowned cloud gestures that are
+    // partially matched — letting the user know they're getting close before the
+    // full claim dialog fires at 85%.
+    var cloudMatchProgress by remember { mutableStateOf(0f) }
+    var cloudMatchCandidate by remember { mutableStateOf<GestureFeatureVector?>(null) }
+
+    LaunchedEffect(liveVector, communityGestures) {
+        val vec = liveVector ?: return@LaunchedEffect
+        if (communityGestures.isEmpty()) return@LaunchedEffect
+        val unowned = communityGestures.filter { cloud ->
+            localGestures.none { it.label == cloud.label && !it.imageUri.isRemoteUrl() }
+        }
+        val best = withContext(Dispatchers.Default) {
+            GestureMatcher.findBestMatch(live = vec, threshold = 0.40f, candidates = unowned)
+        }
+        cloudMatchProgress = best?.second ?: 0f
+        cloudMatchCandidate = best?.first
+    }
+
+    // Async load of the teaser bitmap for the progress bar.
+    var teaserBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    LaunchedEffect(cloudMatchCandidate?.imageUri) {
+        val uri = cloudMatchCandidate?.imageUri
+        if (uri == null) { teaserBitmap = null; return@LaunchedEffect }
+        teaserBitmap = withContext(Dispatchers.IO) {
+            LocalImageStore.loadBitmapCached(context, uri)
         }
     }
 
@@ -492,8 +563,8 @@ fun PoseExpressionApp() {
                             localVersion++
 
                             val uploadResult = cloudRepository.uploadMeme(
-                                localImageUri = uri.toString(),
-                                vector = vector.copy(imageUri = uri.toString()),
+                                localImageUri = localImagePath,
+                                vector = vector.copy(imageUri = localImagePath),
                                 isPublic = true
                             )
 
@@ -510,12 +581,16 @@ fun PoseExpressionApp() {
                                     Toast.LENGTH_SHORT
                                 ).show()
 
-                                val refresh = cloudRepository.fetchPublicGestures()
-                                communityGestures = refresh.getOrDefault(communityGestures)
+                                communityGestures = emptyList()
+                                communityNextCursor = null
+                                communityHasMore = false
+                                loadMoreCommunityGestures()
                             } else {
+                                val e = uploadResult.exceptionOrNull()
+                                android.util.Log.e("FirebaseUpload", "Upload failed", e)
                                 Toast.makeText(
                                     context,
-                                    "Saved locally, but Firebase upload failed: ${uploadResult.exceptionOrNull()?.message}",
+                                    "Saved locally, but Firebase upload failed: ${e?.message}",
                                     Toast.LENGTH_LONG
                                 ).show()
                             }
@@ -574,7 +649,7 @@ fun PoseExpressionApp() {
                                 }
                                 LaunchedEffect(gesture.imageUri) {
                                     cardBitmap = withContext(Dispatchers.IO) {
-                                        LocalImageStore.loadBitmap(context, gesture.imageUri)
+                                        LocalImageStore.loadBitmapCached(context, gesture.imageUri)
                                     }
                                 }
 
@@ -613,6 +688,7 @@ fun PoseExpressionApp() {
 
                                 TextButton(
                                     onClick = {
+                                        BitmapCache.evict(gesture.imageUri)
                                         GestureStore.remove(context, gesture.imageUri)
                                         localGestures = GestureStore.all()
                                         localVersion++
@@ -675,6 +751,7 @@ fun PoseExpressionApp() {
                     onClick = {
                         authError = null
                         authBusy = false
+                        BitmapCache.clear()
                         authRepository.signOut()
                     }
                 ) {
@@ -705,12 +782,40 @@ fun PoseExpressionApp() {
 
                 Spacer(modifier = Modifier.weight(1f))
 
-                val communityText = if (communitySyncing) "Syncing..." else "Cloud ${communityGestures.size}"
-                Text(
-                    text = communityText,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                when {
+                    communitySyncing -> {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.size(12.dp), strokeWidth = 2.dp)
+                            Text(
+                                text = "Syncing…",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    communityHasMore -> {
+                        TextButton(
+                            onClick = { loadMoreCommunityGestures() },
+                            modifier = Modifier.height(36.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp)
+                        ) {
+                            Text(
+                                text = "☁ ${communityGestures.size}  Load more",
+                                style = MaterialTheme.typography.labelMedium
+                            )
+                        }
+                    }
+                    else -> {
+                        Text(
+                            text = "☁ ${communityGestures.size}",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
             }
 
             if (!hasCameraPermission) {
@@ -760,6 +865,101 @@ fun PoseExpressionApp() {
                             overflow = TextOverflow.Ellipsis,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                    }
+                }
+            }
+
+            // ── Cloud-unlock progress panel ───────────────────────────────────
+            // Shows when a community gesture is 40–84% matched but not yet owned.
+            // Blurred teaser reveals itself as confidence rises; claim dialog
+            // fires automatically at 85%.
+            val showUnlockPanel = cloudMatchProgress >= 0.40f
+                    && cloudMatchProgress < 0.85f
+                    && (matchedGesture == null || (isCloudMatch && !alreadyOwned))
+                    && cloudMatchCandidate != null
+
+            if (showUnlockPanel) {
+                val unlockCandidate = cloudMatchCandidate!!
+                Spacer(modifier = Modifier.height(6.dp))
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.92f),
+                            RoundedCornerShape(12.dp)
+                        )
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        // Blurred teaser thumbnail — clears as confidence rises
+                        Box(
+                            modifier = Modifier
+                                .size(56.dp)
+                                .clip(RoundedCornerShape(8.dp)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (teaserBitmap != null) {
+                                val blurDp = ((1f - (cloudMatchProgress - 0.40f) / 0.45f)
+                                    .coerceIn(0f, 1f) * 16f).dp
+                                Image(
+                                    bitmap = teaserBitmap!!.asImageBitmap(),
+                                    contentDescription = "Locked cloud image",
+                                    modifier = Modifier.fillMaxSize().blur(blurDp),
+                                    contentScale = ContentScale.Crop
+                                )
+                                val lockAlpha = (1f - (cloudMatchProgress - 0.40f) / 0.45f)
+                                    .coerceIn(0f, 1f)
+                                Text("🔒", fontSize = 20.sp,
+                                    modifier = Modifier.alpha(lockAlpha))
+                            } else {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .background(
+                                            MaterialTheme.colorScheme.surfaceVariant,
+                                            RoundedCornerShape(8.dp)
+                                        ),
+                                    contentAlignment = Alignment.Center
+                                ) { Text("🔒", fontSize = 20.sp) }
+                            }
+                        }
+
+                        // Label + progress bar
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "☁ Unlock \"${unlockCandidate.label}\"",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            LinearProgressIndicator(
+                                progress = { cloudMatchProgress / 0.85f },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(6.dp)
+                                    .clip(RoundedCornerShape(3.dp)),
+                                color = when {
+                                    cloudMatchProgress >= 0.75f -> Color(0xFF4CAF50)
+                                    cloudMatchProgress >= 0.60f -> Color(0xFFFFC107)
+                                    else -> MaterialTheme.colorScheme.primary
+                                }
+                            )
+                            Spacer(modifier = Modifier.height(3.dp))
+                            Text(
+                                text = "Reenact the pose  •  " +
+                                        "${(cloudMatchProgress * 100).toInt()}% / 85%",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer
+                                    .copy(alpha = 0.7f)
+                            )
+                        }
                     }
                 }
             }

@@ -10,6 +10,78 @@ import java.net.URL
 
 object LocalImageStore {
 
+    /**
+     * Thumbnail side-length used by [loadBitmapScaled] and [loadBitmapCached].
+     * Keeping thumbnails at 256 px means each cached bitmap is ~256 KB — small
+     * enough that the LruCache can hold 24 of them for ~6 MB total.
+     */
+    private const val THUMB_PX = 256
+
+    /**
+     * Load a bitmap from [source], check [BitmapCache] first, decode on miss,
+     * store the result at thumbnail resolution, and return it.
+     *
+     * ⚠ MUST be called from a background thread / IO dispatcher.
+     */
+    fun loadBitmapCached(context: Context, source: String): Bitmap? {
+        BitmapCache.get(source)?.let { return it }
+        val bmp = loadBitmapScaled(context, source, THUMB_PX) ?: return null
+        BitmapCache.put(source, bmp)
+        return bmp
+    }
+
+    /**
+     * Decode [source] at reduced resolution (longest side ≤ [maxPx]).
+     * Uses BitmapFactory inSampleSize so the full image is never fully loaded
+     * into memory for large remote photos.
+     *
+     * ⚠ MUST be called from a background thread / IO dispatcher.
+     */
+    fun loadBitmapScaled(context: Context, source: String, maxPx: Int = THUMB_PX): Bitmap? {
+        return try {
+            // First pass: read dimensions only.
+            val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            openStreamForSource(context, source)?.use {
+                BitmapFactory.decodeStream(it, null, opts)
+            }
+            val rawW = opts.outWidth.takeIf { it > 0 } ?: return loadBitmap(context, source)
+            val rawH = opts.outHeight.takeIf { it > 0 } ?: return loadBitmap(context, source)
+
+            // Compute the largest power-of-two subsample that still produces an
+            // image at least [maxPx] on its longest side.
+            var sample = 1
+            var w = rawW; var h = rawH
+            while (maxOf(w, h) > maxPx * 2) {
+                sample *= 2; w /= 2; h /= 2
+            }
+
+            // Second pass: decode at the computed sample size.
+            val decodeOpts = BitmapFactory.Options().apply { inSampleSize = sample }
+            openStreamForSource(context, source)?.use {
+                BitmapFactory.decodeStream(it, null, decodeOpts)
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** Open an InputStream for any supported [source] scheme. */
+    private fun openStreamForSource(context: Context, source: String): java.io.InputStream? {
+        return when {
+            source.startsWith("http://") || source.startsWith("https://") ->
+                URL(source).openStream()
+
+            source.startsWith("content://") ->
+                context.contentResolver.openInputStream(Uri.parse(source))
+
+            source.startsWith("file://") ->
+                File(Uri.parse(source).path ?: return null).inputStream()
+
+            else ->
+                File(source).inputStream()
+        }
+    }
+
     fun saveBitmapToInternalStorage(
         context: Context,
         bitmap: Bitmap,
