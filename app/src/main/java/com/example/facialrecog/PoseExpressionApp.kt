@@ -756,12 +756,18 @@ fun PoseExpressionApp() {
                     .height(48.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = "MemeGenFR",
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.weight(1f)
-                )
+                Box(
+                    modifier = Modifier.weight(1f),
+                    contentAlignment = Alignment.CenterStart
+                ) {
+                    Image(
+                        painter = androidx.compose.ui.res.painterResource(id = R.drawable.icon),
+                        contentDescription = "App Icon",
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                    )
+                }
 
                 TextButton(onClick = { showDebug = !showDebug }) {
                     Text(if (showDebug) "Debug: ON" else "Debug: OFF")
