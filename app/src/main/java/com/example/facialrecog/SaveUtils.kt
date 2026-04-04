@@ -19,14 +19,14 @@ fun View.toBitmap(): Bitmap {
 fun saveImageToGallery(
     context: android.content.Context,
     bitmap: Bitmap,
-    filename: String = "MemeGenFR_${System.currentTimeMillis()}"
+    filename: String = "WhatsThatMeme_${System.currentTimeMillis()}"
 ): Boolean {
     return try {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val cv = ContentValues().apply {
                 put(MediaStore.Images.Media.DISPLAY_NAME, "$filename.png")
                 put(MediaStore.Images.Media.MIME_TYPE, "image/png")
-                put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/MemeGenFR")
+                put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/WhatsThatMeme")
                 put(MediaStore.Images.Media.IS_PENDING, 1)
             }
             val uri = context.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv)
@@ -38,7 +38,7 @@ fun saveImageToGallery(
             }
             true
         } else {
-            val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "MemeGenFR")
+            val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "WhatsThatMeme")
             dir.mkdirs()
             File(dir, "$filename.png").outputStream().use { s -> bitmap.compress(Bitmap.CompressFormat.PNG, 100, s) }
             true

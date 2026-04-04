@@ -1065,7 +1065,7 @@ fun PoseExpressionApp() {
                             saveSuccess = saved
                             Toast.makeText(
                                 context,
-                                if (saved) "Saved to Pictures/MemeGenFR!" else "Save failed",
+                                if (saved) "Saved to Pictures/WhatsThatMeme!" else "Save failed",
                                 Toast.LENGTH_SHORT
                             ).show()
                         }
@@ -1121,7 +1121,7 @@ private fun AuthGate(
             verticalArrangement = Arrangement.Center
         ) {
             Text(
-                text = "MemeGenFR",
+                text = "Whats That Meme",
                 style = MaterialTheme.typography.headlineMedium,
                 fontWeight = FontWeight.Bold
             )

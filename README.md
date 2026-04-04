@@ -1,6 +1,6 @@
-# MemeGenFR (Face + Pose + Hands → Meme Overlay)
+# Whats That Meme!? (Face + Pose + Hands → Meme Overlay)
 
-MemeGenFR is an Android camera app that detects **face expression**, **body pose**, and **hand gestures** in real time, converts detections into **semantic keywords**, then resolves **one final overlay** (meme image) to display and optionally save.
+Whats That Meme!? is an Android camera app that detects **face expression**, **body pose**, and **hand gestures** in real time, converts detections into **semantic keywords**, then resolves **one final overlay** (meme image) to display and optionally save.
 
 It also supports a **Teach + Library** workflow: teach a gesture using an image, then match it live using similarity scoring.
 
@@ -16,7 +16,7 @@ It also supports a **Teach + Library** workflow: teach a gesture using an image,
 4) Toggle **Debug ON** → landmarks/skeleton are drawn to verify detection  
 5) Tap **Teach** → select an image with a clear gesture → save to Library  
 6) Perform that gesture live → if match score ≥ **0.80**, overlay shows **Learned match**  
-7) Tap **Save Image** → saves output to **Pictures/MemeGenFR**
+7) Tap **Save Image** → saves output to **Pictures/WhatsThatMeme**
 
 ---
 
@@ -97,7 +97,7 @@ This is primarily for verification:
 ## 6) Save Image Behavior
 
 - “Save Image” exports the current overlay result into the device gallery
-- Saved location: **Pictures/MemeGenFR**
+- Saved location: **Pictures/WhatsThatMeme**
 - A toast/snackbar confirms success (if enabled in your UI)
 
 ---
@@ -125,16 +125,16 @@ This is primarily for verification:
 
 ## 9) Suggested Test Cases (What we verified)
 
-| Test | Input | Expected Output |
-|------|-------|-----------------|
-| Calibration start | Neutral face at launch | Shows `Calibrating…` until baseline completes |
-| Hands up pose | Both wrists above shoulders | Keyword includes `hands_up` |
-| Two-hand open | Two open hands visible | Keyword includes `both_hands_up` (or equivalent) |
-| Peace sign | Index + middle extended | Keyword includes `peace_sign` |
-| Double gun | Both hands gun pose | Keyword includes `double_gun` |
-| No detection | No face/hands in view | Fallback keyword/state appears |
-| Teach + learned match | Teach gesture image, then perform live | Match score ≥ 0.80 and overlay shows “Learned match” |
-| Save image | Press “Save Image” while overlay shown | Image saved to Pictures/MemeGenFR and confirmation shown |
+| Test | Input | Expected Output                                              |
+|------|-------|--------------------------------------------------------------|
+| Calibration start | Neutral face at launch | Shows `Calibrating…` until baseline completes                |
+| Hands up pose | Both wrists above shoulders | Keyword includes `hands_up`                                  |
+| Two-hand open | Two open hands visible | Keyword includes `both_hands_up` (or equivalent)             |
+| Peace sign | Index + middle extended | Keyword includes `peace_sign`                                |
+| Double gun | Both hands gun pose | Keyword includes `double_gun`                                |
+| No detection | No face/hands in view | Fallback keyword/state appears                               |
+| Teach + learned match | Teach gesture image, then perform live | Match score ≥ 0.80 and overlay shows “Learned match”         |
+| Save image | Press “Save Image” while overlay shown | Image saved to Pictures/WhatsThatMeme and confirmation shown |
 
 ---
 
