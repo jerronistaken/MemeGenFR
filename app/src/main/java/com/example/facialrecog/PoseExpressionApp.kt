@@ -1121,7 +1121,7 @@ private fun AuthGate(
             verticalArrangement = Arrangement.Center
         ) {
             Text(
-                text = "Whats That Meme",
+                text = "Whats That Meme!?",
                 style = MaterialTheme.typography.headlineMedium,
                 fontWeight = FontWeight.Bold
             )
